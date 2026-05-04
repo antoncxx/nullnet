@@ -5,7 +5,7 @@ use std::sync::Mutex;
 /// Per-trigger-port lifecycle:
 /// - `Pending`: backend_trigger fired, waiting for the server to set up the chain.
 /// - `Active`: VXLAN is up and DNAT is installed. Stores the bookkeeping
-/// needed to tear DNAT down when the matching VxlanTeardown arrives.
+///   needed to tear DNAT down when the matching VxlanTeardown arrives.
 pub enum Lifecycle {
     Pending,
     Active { vxlan_id: u32, overlay_ip: Ipv4Addr },

@@ -1,5 +1,0 @@
-triggers = []
-
-#[[triggers]]
-#port = 8080
-#service_name = "color.com"

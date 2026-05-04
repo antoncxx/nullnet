@@ -188,23 +188,14 @@ async fn handle_vxlan_setup(
     if let Some(host_mapping) = &message.host_mapping {
         let _ = add_host_mapping(host_mapping, message.docker_container.as_deref());
 
-        // install DNAT for every port mapped to this service so the next SYN retransmit
-        // gets rewritten to the overlay IP and routed through the new VXLAN
-        if let Ok(overlay_ip) = host_mapping.ip.parse::<Ipv4Addr>() {
-            // TODO: generalize code
-            dnat::install(5555, overlay_ip);
-            triggers_state.mark_active(&host_mapping.name, vxlan_id, overlay_ip, Vec::from([5555]));
-            // let ports = triggers_state
-            //     .service_to_ports
-            //     .get(&host_mapping.name)
-            //     .cloned()
-            //     .unwrap_or_default();
-            // for &port in &ports {
-            //     dnat::install(port, overlay_ip);
-            // }
-            // if !ports.is_empty() {
-            //     triggers_state.mark_active(&host_mapping.name, vxlan_id, overlay_ip, ports);
-            // }
+        // backend-entry edge: install DNAT(dnat_port -> overlay_ip) so the
+        // initiator's traffic on that local port is steered into the new VXLAN
+        if let Some(dnat_port) = message.dnat_port
+            && let Ok(dnat_port) = u16::try_from(dnat_port)
+            && let Ok(overlay_ip) = host_mapping.ip.parse::<Ipv4Addr>()
+        {
+            dnat::install(dnat_port, overlay_ip);
+            triggers_state.mark_active(dnat_port, vxlan_id, overlay_ip);
         }
     }
 
@@ -216,10 +207,8 @@ async fn handle_vxlan_setup(
 
 fn handle_vxlan_teardown(message: VxlanTeardown, triggers_state: Arc<TriggersState>) {
     // remove DNAT before tearing the tunnel down so existing flows reset cleanly
-    if let Some((overlay_ip, ports)) = triggers_state.remove_by_vxlan(message.vxlan_id) {
-        for port in ports {
-            dnat::remove(port, overlay_ip);
-        }
+    if let Some((port, overlay_ip)) = triggers_state.remove_by_vxlan(message.vxlan_id) {
+        dnat::remove(port, overlay_ip);
     }
 
     // teardown VXLAN on this machine

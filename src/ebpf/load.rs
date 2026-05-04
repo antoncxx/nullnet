@@ -162,11 +162,7 @@ async fn run_observer(
     }
 }
 
-fn apply_watch_ports_diff(
-    bpf: &mut Ebpf,
-    old: &HashMap<u16, String>,
-    new: &HashMap<u16, String>,
-) {
+fn apply_watch_ports_diff(bpf: &mut Ebpf, old: &HashMap<u16, String>, new: &HashMap<u16, String>) {
     let Some(map) = bpf.map_mut("WATCH_PORTS") else {
         eprintln!("[observer] WATCH_PORTS map not found; skipping diff");
         return;

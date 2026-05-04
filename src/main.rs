@@ -109,10 +109,8 @@ async fn main() -> Result<(), Error> {
 
     // observe outgoing dependency-port traffic via eBPF; the observer's
     // watch-port set is driven by the services-list response from the server.
-    let (config_tx, config_rx) =
-        tokio::sync::mpsc::unbounded_channel::<HashMap<u16, String>>();
-    let (trigger_tx, mut trigger_rx) =
-        tokio::sync::mpsc::unbounded_channel::<(String, u16)>();
+    let (config_tx, config_rx) = tokio::sync::mpsc::unbounded_channel::<HashMap<u16, String>>();
+    let (trigger_tx, mut trigger_rx) = tokio::sync::mpsc::unbounded_channel::<(String, u16)>();
     ebpf::load::load_ebpf(&ETH_NAME, config_rx, trigger_tx);
 
     // declare services + push trigger config to the eBPF observer on each refresh

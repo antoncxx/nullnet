@@ -116,7 +116,9 @@ fn filter_ports(ctx: TcContext) -> Result<i32, ()> {
                     // let src_port = u16::from_be_bytes(unsafe { (*udp_header).src });
                     let dst_port = u16::from_be_bytes(unsafe { (*udp_header).dst });
 
-                    emit_if_watched(dst_port);
+                    if emit_if_watched(dst_port) {
+                        return Ok(TC_ACT_SHOT);
+                    }
 
                     // if src_port == 9999 && dst_port == 9999 {
                     //     return Ok(TC_ACT_OK);
@@ -127,7 +129,9 @@ fn filter_ports(ctx: TcContext) -> Result<i32, ()> {
                     // let src_port = u16::from_be_bytes(unsafe { (*tcp_header).source });
                     let dst_port = u16::from_be_bytes(unsafe { (*tcp_header).dest });
 
-                    emit_if_watched(dst_port);
+                    if emit_if_watched(dst_port) {
+                        return Ok(TC_ACT_SHOT);
+                    }
 
                     // if src_port == 50051 || dst_port == 50051 {
                     //     return Ok(TC_ACT_OK);
@@ -147,17 +151,18 @@ fn filter_ports(ctx: TcContext) -> Result<i32, ()> {
 }
 
 #[inline]
-fn emit_if_watched(dst_port: u16) {
+fn emit_if_watched(dst_port: u16) -> bool {
     if unsafe { core::ptr::read_volatile(&IS_EGRESS) } == 0 {
-        return;
+        return false;
     }
     if unsafe { WATCH_PORTS.get(&dst_port) }.is_none() {
-        return;
+        return false;
     }
     if let Some(mut entry) = EVENTS.reserve::<u16>(0) {
         entry.write(dst_port);
         entry.submit(0);
     }
+    true
 }
 
 // #[inline]

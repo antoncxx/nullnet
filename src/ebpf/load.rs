@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::Ipv4Addr;
 
 use aya::{
     Ebpf, EbpfLoader, include_bytes_aligned,
@@ -140,20 +141,21 @@ async fn run_observer(
                 let events = guard.get_inner_mut();
                 while let Some(item) = events.next() {
                     let bytes: &[u8] = &item;
-                    if bytes.len() < 2 {
+                    if bytes.len() < 6 {
                         continue;
                     }
                     let port = u16::from_le_bytes([bytes[0], bytes[1]]);
+                    let dst_ip = Ipv4Addr::new(bytes[2], bytes[3], bytes[4], bytes[5]);
                     if let Some(service_name) = port_to_service.get(&port) {
                         if let Err(e) = trigger_tx.send((service_name.clone(), port)) {
                             eprintln!(
-                                "[observer] failed to enqueue trigger for '{service_name}' port {port}: {e}"
+                                "[observer] failed to enqueue trigger for '{service_name}' port {port} dst {dst_ip}: {e}"
                             );
                         } else {
-                            println!("[observer] enqueued trigger for '{service_name}' port {port}");
+                            println!("[observer] enqueued trigger for '{service_name}' port {port} dst {dst_ip}");
                         }
                     } else {
-                        println!("[observer] no service mapped to port {port}");
+                        println!("[observer] no service mapped to port {port} dst {dst_ip}");
                     }
                 }
                 guard.clear_ready();

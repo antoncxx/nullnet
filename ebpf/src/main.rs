@@ -115,8 +115,9 @@ fn filter_ports(ctx: TcContext) -> Result<i32, ()> {
                     let udp_header: *const UdpHdr = ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN)?;
                     // let src_port = u16::from_be_bytes(unsafe { (*udp_header).src });
                     let dst_port = u16::from_be_bytes(unsafe { (*udp_header).dst });
+                    let dst_ip = unsafe { (*ipv4_header).dst_addr };
 
-                    if emit_if_watched(dst_port) {
+                    if emit_if_watched(dst_port, dst_ip) {
                         return Ok(TC_ACT_SHOT);
                     }
 
@@ -128,8 +129,9 @@ fn filter_ports(ctx: TcContext) -> Result<i32, ()> {
                     let tcp_header: *const TcpHdr = ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN)?;
                     // let src_port = u16::from_be_bytes(unsafe { (*tcp_header).source });
                     let dst_port = u16::from_be_bytes(unsafe { (*tcp_header).dest });
+                    let dst_ip = unsafe { (*ipv4_header).dst_addr };
 
-                    if emit_if_watched(dst_port) {
+                    if emit_if_watched(dst_port, dst_ip) {
                         return Ok(TC_ACT_SHOT);
                     }
 
@@ -150,16 +152,22 @@ fn filter_ports(ctx: TcContext) -> Result<i32, ()> {
     Ok(TC_ACT_OK)
 }
 
+#[repr(C)]
+struct PortEvent {
+    port: u16,
+    dst_ip: [u8; 4],
+}
+
 #[inline]
-fn emit_if_watched(dst_port: u16) -> bool {
+fn emit_if_watched(dst_port: u16, dst_ip: [u8; 4]) -> bool {
     if unsafe { core::ptr::read_volatile(&IS_EGRESS) } == 0 {
         return false;
     }
     if unsafe { WATCH_PORTS.get(&dst_port) }.is_none() {
         return false;
     }
-    if let Some(mut entry) = EVENTS.reserve::<u16>(0) {
-        entry.write(dst_port);
+    if let Some(mut entry) = EVENTS.reserve::<PortEvent>(0) {
+        entry.write(PortEvent { port: dst_port, dst_ip });
         entry.submit(0);
     }
     true

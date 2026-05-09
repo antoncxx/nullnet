@@ -237,22 +237,17 @@ fn add_host_mapping(hm: &HostMapping, docker_container: Option<&str>) -> Result<
 
     // parse each line IP and name: if name exists replace the line, else append
     let content = std::fs::read_to_string(path).handle_err(location!())?;
-    let mut lines: Vec<String> = content.lines().map(ToString::to_string).collect();
-    let mut found = false;
-    for line in &mut lines {
-        if line.contains(&hm.name) {
-            line.clone_from(&entry);
-            found = true;
-        }
-    }
-    if !found {
-        lines.push(entry);
-    }
-    std::fs::write(path, lines.join("\n") + "\n").handle_err(location!())?;
+    std::fs::write(path, upsert_hosts_entry(&content, &hm.name, &entry)).handle_err(location!())?;
 
-    // copy /etc/hosts content into the container
+    // apply the same upsert inside the container — the container's /etc/hosts
+    // has its own contents (Docker manages a few entries there), so we read
+    // it, run the same line loop, and write back.
     if let Some(container) = docker_container {
-        let content = std::fs::read_to_string(path).handle_err(location!())?;
+        let cat = std::process::Command::new("docker")
+            .args(["exec", container, "cat", path])
+            .output()
+            .handle_err(location!())?;
+        let content = upsert_hosts_entry(&String::from_utf8_lossy(&cat.stdout), &hm.name, &entry);
         let _ = std::process::Command::new("docker")
             .args([
                 "exec",
@@ -267,4 +262,19 @@ fn add_host_mapping(hm: &HostMapping, docker_container: Option<&str>) -> Result<
     }
 
     Ok(())
+}
+
+fn upsert_hosts_entry(content: &str, name: &str, entry: &str) -> String {
+    let mut lines: Vec<String> = content.lines().map(ToString::to_string).collect();
+    let mut found = false;
+    for line in &mut lines {
+        if line.contains(name) {
+            *line = entry.to_string();
+            found = true;
+        }
+    }
+    if !found {
+        lines.push(entry.to_string());
+    }
+    lines.join("\n") + "\n"
 }

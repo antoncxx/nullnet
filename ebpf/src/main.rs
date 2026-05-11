@@ -105,6 +105,7 @@ fn filter_ports(ctx: TcContext) -> Result<i32, ()> {
     let eth_header: *const EthHdr = ptr_at(&ctx, 0)?;
     let ether_type = EtherType::try_from(unsafe { (*eth_header).ether_type }).map_err(|_| ())?;
 
+    #[allow(clippy::single_match)]
     match ether_type {
         EtherType::Ipv4 => {
             let ipv4_header: *const Ipv4Hdr = ptr_at(&ctx, EthHdr::LEN)?;

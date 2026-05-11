@@ -1,4 +1,5 @@
-use crate::commands::{RtNetLinkHandle, configure_access_port, remove_vlan};
+use crate::commands::{RtNetLinkHandle, configure_access_port, dnat, remove_vlan};
+use crate::ebpf::triggers::TriggersState;
 use crate::peers::peer::{Peers, VethKey};
 use ipnetwork::Ipv4Network;
 use nullnet_grpc_lib::NullnetGrpcInterface;
@@ -15,6 +16,7 @@ pub(crate) async fn control_channel(
     server: NullnetGrpcInterface,
     peers: Arc<RwLock<Peers>>,
     rtnetlink_handle: RtNetLinkHandle,
+    triggers_state: Arc<TriggersState>,
 ) -> Result<(), Error> {
     let (outbound, grpc_rx) = mpsc::channel(64);
     let mut inbound = server
@@ -38,13 +40,15 @@ pub(crate) async fn control_channel(
                 });
             }
             Some(net_message::Message::VxlanSetup(vxlan_setup)) => {
+                let triggers_state = triggers_state.clone();
                 tokio::spawn(async move {
-                    let _ = handle_vxlan_setup(vxlan_setup, outbound).await;
+                    let _ = handle_vxlan_setup(vxlan_setup, outbound, triggers_state).await;
                 });
             }
             Some(net_message::Message::VxlanTeardown(vxlan_teardown)) => {
+                let triggers_state = triggers_state.clone();
                 tokio::spawn(async move {
-                    handle_vxlan_teardown(vxlan_teardown);
+                    handle_vxlan_teardown(vxlan_teardown, triggers_state);
                 });
             }
             None => {}
@@ -131,7 +135,11 @@ async fn handle_vlan_teardown(
     Ok(())
 }
 
-async fn handle_vxlan_setup(message: VxlanSetup, outbound: Sender<MsgId>) -> Result<(), Error> {
+async fn handle_vxlan_setup(
+    message: VxlanSetup,
+    outbound: Sender<MsgId>,
+    triggers_state: Arc<TriggersState>,
+) -> Result<(), Error> {
     let msg_id = &message
         .msg_id
         .ok_or("Missing message ID in VXLAN setup message")
@@ -179,6 +187,16 @@ async fn handle_vxlan_setup(message: VxlanSetup, outbound: Sender<MsgId>) -> Res
     // add host mapping if needed
     if let Some(host_mapping) = &message.host_mapping {
         let _ = add_host_mapping(host_mapping, message.docker_container.as_deref());
+
+        // backend-entry edge: install DNAT(dnat_port -> overlay_ip) so the
+        // initiator's traffic on that local port is steered into the new VXLAN
+        if let Some(dnat_port) = message.dnat_port
+            && let Ok(dnat_port) = u16::try_from(dnat_port)
+            && let Ok(overlay_ip) = host_mapping.ip.parse::<Ipv4Addr>()
+        {
+            dnat::install(dnat_port, overlay_ip);
+            triggers_state.mark_active(dnat_port, vxlan_id, overlay_ip);
+        }
     }
 
     // acknowledge message
@@ -187,7 +205,12 @@ async fn handle_vxlan_setup(message: VxlanSetup, outbound: Sender<MsgId>) -> Res
     Ok(())
 }
 
-fn handle_vxlan_teardown(message: VxlanTeardown) {
+fn handle_vxlan_teardown(message: VxlanTeardown, triggers_state: Arc<TriggersState>) {
+    // remove DNAT before tearing the tunnel down so existing flows reset cleanly
+    if let Some((port, overlay_ip)) = triggers_state.remove_by_vxlan(message.vxlan_id) {
+        dnat::remove(port, overlay_ip);
+    }
+
     // teardown VXLAN on this machine
     let init_t = std::time::Instant::now();
 
@@ -214,34 +237,52 @@ fn add_host_mapping(hm: &HostMapping, docker_container: Option<&str>) -> Result<
 
     // parse each line IP and name: if name exists replace the line, else append
     let content = std::fs::read_to_string(path).handle_err(location!())?;
+    std::fs::write(path, upsert_hosts_entry(&content, &hm.name, &entry)).handle_err(location!())?;
+
+    // apply the same upsert inside the container — the container's /etc/hosts
+    // has its own contents (Docker manages a few entries there), so we read
+    // it, run the same line loop, and write back.
+    if let Some(container) = docker_container {
+        let cat = std::process::Command::new("docker")
+            .args(["exec", container, "cat", path])
+            .output()
+            .handle_err(location!())?;
+        let content = upsert_hosts_entry(&String::from_utf8_lossy(&cat.stdout), &hm.name, &entry);
+        let mut child = std::process::Command::new("docker")
+            .args([
+                "exec",
+                "-i",
+                container,
+                "sh",
+                "-c",
+                &format!("cat > {path}"),
+            ])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .handle_err(location!())?;
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            stdin
+                .write_all(content.as_bytes())
+                .handle_err(location!())?;
+        }
+        let _ = child.wait();
+    }
+
+    Ok(())
+}
+
+fn upsert_hosts_entry(content: &str, name: &str, entry: &str) -> String {
     let mut lines: Vec<String> = content.lines().map(ToString::to_string).collect();
     let mut found = false;
     for line in &mut lines {
-        if line.contains(&hm.name) {
-            line.clone_from(&entry);
+        if line.split_whitespace().skip(1).any(|tok| tok == name) {
+            *line = entry.to_string();
             found = true;
         }
     }
     if !found {
-        lines.push(entry);
+        lines.push(entry.to_string());
     }
-    std::fs::write(path, lines.join("\n") + "\n").handle_err(location!())?;
-
-    // copy /etc/hosts content into the container
-    if let Some(container) = docker_container {
-        let content = std::fs::read_to_string(path).handle_err(location!())?;
-        let _ = std::process::Command::new("docker")
-            .args([
-                "exec",
-                container,
-                "sh",
-                "-c",
-                &format!("echo '{content}' > {path}"),
-            ])
-            .spawn()
-            .map(|mut c| c.wait())
-            .handle_err(location!());
-    }
-
-    Ok(())
+    lines.join("\n") + "\n"
 }

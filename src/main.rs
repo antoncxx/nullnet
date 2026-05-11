@@ -3,7 +3,8 @@
 use crate::cli::Args;
 use crate::commands::{RtNetLinkHandle, cleanup_network, setup_br0};
 use crate::control_channel::control_channel;
-use crate::env::{CONTROL_SERVICE_ADDR, CONTROL_SERVICE_PORT};
+use crate::ebpf::triggers::TriggersState;
+use crate::env::{CONTROL_SERVICE_ADDR, CONTROL_SERVICE_PORT, ETH_NAME};
 use crate::forward::receive::receive;
 use crate::forward::send::send;
 use crate::local_endpoints::LocalEndpoints;
@@ -12,7 +13,7 @@ use clap::Parser;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use nullnet_firewall::{DataLink, Firewall, FirewallError, LogLevel};
 use nullnet_grpc_lib::NullnetGrpcInterface;
-use nullnet_grpc_lib::nullnet_grpc::{Net, Services};
+use nullnet_grpc_lib::nullnet_grpc::{Net, Services, ServicesListResponse};
 use nullnet_liberror::{Error, ErrorHandler, Location, location};
 use std::collections::HashMap;
 use std::ops::Sub;
@@ -21,12 +22,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{panic, process};
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::UnboundedSender;
 use tun_rs::{DeviceBuilder, Layer};
 
 mod cli;
 mod commands;
 mod control_channel;
 mod craft;
+mod ebpf;
 mod env;
 mod forward;
 mod local_endpoints;
@@ -81,6 +84,7 @@ async fn main() -> Result<(), Error> {
     // initialize gRPC connection
     let grpc_server = grpc_init().await?;
     let grpc_server2 = grpc_server.clone();
+    let grpc_server3 = grpc_server.clone();
 
     let net_type = grpc_server.network_type().await.handle_err(location!())?;
 
@@ -91,18 +95,46 @@ async fn main() -> Result<(), Error> {
 
     print_info(net_type.net());
 
-    // read our services list from file and send it to the gRPC server
+    // shared dedup state (one trigger pending/active per port until teardown)
+    let triggers_state = Arc::new(TriggersState::default());
+    let triggers_state_cc = triggers_state.clone();
+    let triggers_state_tr = triggers_state.clone();
+
+    // listen on the gRPC control channel
     tokio::spawn(async move {
-        declare_services(grpc_server)
+        control_channel(grpc_server2, peers_2, rtnetlink_handle, triggers_state_cc)
+            .await
+            .expect("Control channel failed");
+    });
+
+    // observe outgoing dependency-port traffic via eBPF; the observer's
+    // watch-port set is driven by the services-list response from the server.
+    let (config_tx, config_rx) = tokio::sync::mpsc::unbounded_channel::<HashMap<u16, String>>();
+    let (trigger_tx, mut trigger_rx) = tokio::sync::mpsc::unbounded_channel::<(String, u16)>();
+    ebpf::load::load_ebpf(&ETH_NAME, config_rx, trigger_tx);
+
+    // declare services + push trigger config to the eBPF observer on each refresh
+    tokio::spawn(async move {
+        declare_services(grpc_server, config_tx)
             .await
             .expect("Failed to declare services");
     });
 
-    // listen on the gRPC control channel
+    // forward observed triggers to the gRPC server
     tokio::spawn(async move {
-        control_channel(grpc_server2, peers_2, rtnetlink_handle)
-            .await
-            .expect("Control channel failed");
+        while let Some((service_name, port)) = trigger_rx.recv().await {
+            if !triggers_state_tr.try_mark_pending(port) {
+                continue;
+            }
+            if let Err(e) = grpc_server3
+                .backend_trigger(service_name.clone(), u32::from(port))
+                .await
+            {
+                eprintln!("backend_trigger for '{service_name}' port {port} failed: {e}");
+                // allow re-trigger on next observed packet
+                triggers_state_tr.forget(port);
+            }
+        }
     });
 
     // watch the file defining rules and update the firewall accordingly
@@ -195,7 +227,10 @@ async fn grpc_init() -> Result<NullnetGrpcInterface, Error> {
     Ok(server)
 }
 
-async fn declare_services(grpc_server: NullnetGrpcInterface) -> Result<(), Error> {
+async fn declare_services(
+    grpc_server: NullnetGrpcInterface,
+    config_tx: UnboundedSender<HashMap<u16, String>>,
+) -> Result<(), Error> {
     loop {
         // read services from file
         let services_toml = tokio::fs::read_to_string("services.toml")
@@ -235,11 +270,27 @@ async fn declare_services(grpc_server: NullnetGrpcInterface) -> Result<(), Error
 
         println!("Declaring services to gRPC server: {services:?}");
 
-        // send services to gRPC server
-        grpc_server
+        // send services to gRPC server; response carries the trigger ports
+        // attached to the services we just declared as hosting.
+        let response: ServicesListResponse = grpc_server
             .services_list(services)
             .await
             .handle_err(location!())?;
+
+        let mut port_to_service: HashMap<u16, String> = HashMap::new();
+        for st in response.service_triggers {
+            for port in st.ports {
+                let Ok(port) = u16::try_from(port) else {
+                    eprintln!("server returned invalid trigger port {port}; skipping");
+                    continue;
+                };
+                port_to_service.insert(port, st.service_name.clone());
+            }
+        }
+        if config_tx.send(port_to_service).is_err() {
+            // observer task gone; nothing more to do here
+            return Ok(());
+        }
 
         // wait before re-declaring services
         tokio::time::sleep(Duration::from_secs(10)).await;

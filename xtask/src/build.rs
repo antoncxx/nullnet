@@ -74,5 +74,22 @@ pub fn lint() -> Result<(), anyhow::Error> {
     if !status.success() {
         bail!("clippy reported errors (exit {status})");
     }
+    let status = Command::new("cargo")
+        .current_dir("ebpf")
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .args([
+            "clippy",
+            "--target=bpfel-unknown-none",
+            "-Z",
+            "build-std=core",
+            "--",
+            "-D",
+            "warnings",
+        ])
+        .status()
+        .context("spawning cargo clippy for eBPF")?;
+    if !status.success() {
+        bail!("eBPF clippy reported errors (exit {status})");
+    }
     Ok(())
 }

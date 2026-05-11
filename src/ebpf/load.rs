@@ -78,7 +78,10 @@ fn attach(eth_name: &str, direction: TcAttachType) -> Result<Ebpf, String> {
     }
 
     let mut bpf = loader
-        .load(include_bytes_aligned!(env!("NULLNET_BIN_PATH")))
+        .load(include_bytes_aligned!(env!(
+            "NULLNET_BIN_PATH",
+            "NULLNET_BIN_PATH not set — build via `cargo xtask build` (see README)"
+        )))
         .map_err(|e| format!("[{direction:?}] load eBPF bytecode: {e}"))?;
     println!("[{direction:?}] eBPF bytecode loaded");
 

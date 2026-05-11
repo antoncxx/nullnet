@@ -248,17 +248,25 @@ fn add_host_mapping(hm: &HostMapping, docker_container: Option<&str>) -> Result<
             .output()
             .handle_err(location!())?;
         let content = upsert_hosts_entry(&String::from_utf8_lossy(&cat.stdout), &hm.name, &entry);
-        let _ = std::process::Command::new("docker")
+        let mut child = std::process::Command::new("docker")
             .args([
                 "exec",
+                "-i",
                 container,
                 "sh",
                 "-c",
-                &format!("echo '{content}' > {path}"),
+                &format!("cat > {path}"),
             ])
+            .stdin(std::process::Stdio::piped())
             .spawn()
-            .map(|mut c| c.wait())
-            .handle_err(location!());
+            .handle_err(location!())?;
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            stdin
+                .write_all(content.as_bytes())
+                .handle_err(location!())?;
+        }
+        let _ = child.wait();
     }
 
     Ok(())
@@ -268,7 +276,7 @@ fn upsert_hosts_entry(content: &str, name: &str, entry: &str) -> String {
     let mut lines: Vec<String> = content.lines().map(ToString::to_string).collect();
     let mut found = false;
     for line in &mut lines {
-        if line.contains(name) {
+        if line.split_whitespace().skip(1).any(|tok| tok == name) {
             *line = entry.to_string();
             found = true;
         }

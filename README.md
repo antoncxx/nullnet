@@ -35,7 +35,7 @@ plus the shared gRPC interface.
   sudo mv protoc3/include/* /usr/local/include/
   ```
 
-The repository should be cloned under `/root/nullnet` so the provided `linux-setup.sh` scripts and
+The repository should be cloned under `/root/nullnet` so the provided `setup-*.sh` scripts and
 `.service` units work without changes.
 
 ## Usage
@@ -70,13 +70,12 @@ The repository should be cloned under `/root/nullnet` so the provided `linux-set
   chain walked when the service is reached via a `BackendTrigger` RPC from nullnet-client (one
   chain per port)
 
-- run the project as a daemon
+- run the project as a daemon (from the repo root)
   ```
-  cd members/nullnet-server
-  ./linux-setup.sh
+  ./setup-server.sh
   ```
 
-- the server will regularly update a view of the network and store it in `graph.dot`
+- the server will regularly update a view of the network and store it in `members/nullnet-server/graph.dot`
 
 ***
 
@@ -89,10 +88,9 @@ The repository should be cloned under `/root/nullnet` so the provided `linux-set
   CONTROL_SERVICE_PORT=50051
   ```
 
-- run the project as a daemon
+- run the project as a daemon (from the repo root)
   ```
-  cd members/nullnet-proxy
-  ./linux-setup.sh
+  ./setup-proxy.sh
   ```
 
 - the proxy will run on port 80 and receive requests in the form `service_name:80`
@@ -122,8 +120,7 @@ The repository should be cloned under `/root/nullnet` so the provided `linux-set
   ...
   ```
 
-- run the project as a daemon
+- run the project as a daemon (from the repo root)
   ```
-  cd members/nullnet-client
-  ./linux-setup.sh
+  ./setup-client.sh
   ```

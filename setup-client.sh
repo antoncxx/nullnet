@@ -9,6 +9,6 @@ sudo mv protoc3/include/* /usr/local/include/ && \
 cargo install bpf-linker && \
 git pull && \
 cargo xtask build --release && \
-sudo cp nullnet-client.service /etc/systemd/system/ && \
+sudo cp members/nullnet-client/nullnet-client.service /etc/systemd/system/ && \
 sudo systemctl enable nullnet-client && \
 sudo systemctl restart nullnet-client

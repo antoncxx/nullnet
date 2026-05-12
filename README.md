@@ -27,15 +27,7 @@ plus the shared gRPC interface.
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
 
-- install protobuf (needed by `nullnet-grpc-lib`'s `build.rs`)
-  ```
-  curl -OL https://github.com/google/protobuf/releases/download/v3.20.3/protoc-3.20.3-linux-x86_64.zip
-  unzip protoc-3.20.3-linux-x86_64.zip -d protoc3
-  sudo mv protoc3/bin/* /usr/local/bin/
-  sudo mv protoc3/include/* /usr/local/include/
-  ```
-
-The repository should be cloned under `/root/nullnet` so the provided `setup-*.sh` scripts and
+The repository should be cloned under `/root` so the provided `setup-*.sh` scripts and
 `.service` units work without changes.
 
 ## Usage
@@ -62,6 +54,7 @@ The repository should be cloned under `/root/nullnet` so the provided `setup-*.s
 
   [[services]]
   name = "fs.color.com"
+  ...
   ```
 
 - `proxy_dependencies` is a linear dep chain walked when the service is reached via a `Proxy`

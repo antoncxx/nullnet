@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["members/*", "xtask"]
-exclude = ["members/nullnet-proxy/pingora-test", "ebpf"]
+exclude = ["ebpf"]
 
 [workspace.package]
 version = "0.1.0"

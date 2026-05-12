@@ -1,0 +1,13 @@
+[Unit]
+Description=Nullnet proxy
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/nullnet/members/nullnet-proxy
+EnvironmentFile=/root/nullnet/members/nullnet-proxy/.env
+ExecStart=/root/nullnet/target/release/nullnet-proxy
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

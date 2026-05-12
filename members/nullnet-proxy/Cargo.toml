@@ -1,0 +1,16 @@
+[package]
+name = "nullnet-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+pingora-core = { version = "0.8.0", features = ["rustls"] }
+pingora-proxy = "0.8.0"
+nullnet-grpc-lib.workspace = true
+nullnet-liberror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+gag.workspace = true
+chrono.workspace = true

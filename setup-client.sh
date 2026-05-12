@@ -6,7 +6,8 @@ curl -OL https://github.com/google/protobuf/releases/download/v3.20.3/protoc-3.2
 unzip -o protoc-3.20.3-linux-x86_64.zip -d protoc3 && \
 sudo mv protoc3/bin/* /usr/local/bin/ && \
 sudo mv protoc3/include/* /usr/local/include/ && \
-cargo install bpf-linker && \
+cargo install cargo-binstall && \
+cargo binstall -y bpf-linker && \
 git pull && \
 cargo xtask build --release && \
 sudo cp members/nullnet-client/nullnet-client.service /etc/systemd/system/ && \

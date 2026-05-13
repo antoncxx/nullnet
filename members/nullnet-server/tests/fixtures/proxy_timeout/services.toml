@@ -1,0 +1,9 @@
+[[services]]
+name = "A"
+timeout = 1
+proxy_dependencies = ["C", "D"]
+
+[[services]]
+name = "B"
+timeout = 2
+proxy_dependencies = ["D"]

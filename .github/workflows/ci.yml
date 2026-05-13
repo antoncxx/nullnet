@@ -11,37 +11,78 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# Linters inspired from here: https://github.com/actions-rs/meta/blob/master/recipes/quickstart.md
 jobs:
 
-  rust:
-    name: ${{ matrix.os }}-latest
-    runs-on: ${{ matrix.os }}-latest
+  stable:
+    name: stable - ${{ matrix.package }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: true
       matrix:
-        include:
-          - os: ubuntu
-#          - os: macos
-#          - os: windows
+        package:
+          - nullnet-grpc-lib
+          - nullnet-server
+          - nullnet-proxy
 
     steps:
       - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install protoc
+        run: |
+          curl -OL https://github.com/google/protobuf/releases/download/v3.20.3/protoc-3.20.3-linux-x86_64.zip
+          unzip protoc-3.20.3-linux-x86_64.zip -d protoc3
+          sudo mv protoc3/bin/* /usr/local/bin/
+          sudo mv protoc3/include/* /usr/local/include/
+
+      - name: fmt
+        run: cargo fmt -p ${{ matrix.package }} -- --check
+
+      - name: build
+        run: cargo build -p ${{ matrix.package }} --verbose
+
+      - name: clippy
+        run: cargo clippy -p ${{ matrix.package }} -- -D warnings
+
+      - name: test
+        run: cargo test -p ${{ matrix.package }} --verbose -- --nocapture
+
+  nightly-client:
+    name: nightly - nullnet-client + ebpf
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src, rustfmt, clippy
+
       - name: install bpf-linker
         run: cargo install bpf-linker --locked
 
+      - name: Install protoc
+        run: |
+          curl -OL https://github.com/google/protobuf/releases/download/v3.20.3/protoc-3.20.3-linux-x86_64.zip
+          unzip protoc-3.20.3-linux-x86_64.zip -d protoc3
+          sudo mv protoc3/bin/* /usr/local/bin/
+          sudo mv protoc3/include/* /usr/local/include/
+
       - name: fmt
         run: |
-          cargo fmt --all -- --check
+          cargo fmt -p nullnet-client -- --check
           cargo fmt --manifest-path ebpf/Cargo.toml --all -- --check
+
       - name: build
         run: cargo xtask build
+
       - name: clippy
         run: cargo xtask lint
+
       - name: test
         env:
           NULLNET_BIN_PATH: ${{ github.workspace }}/target/bpfel-unknown-none/debug/nullnet
-        run: cargo test --verbose -- --nocapture
+        run: cargo test -p nullnet-client --verbose -- --nocapture

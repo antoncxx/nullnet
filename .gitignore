@@ -4,3 +4,6 @@
 **/**/*.sqlite
 peers.txt
 .*drawio.bkp
+**/*.rs.bk
+*.pdb
+**/mutants.out*/

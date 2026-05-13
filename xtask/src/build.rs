@@ -27,7 +27,7 @@ fn set_ebpf_build_base_dir(build_type: &str) {
 
 /// Build the project
 fn build_project(opts: &Options) -> Result<(), anyhow::Error> {
-    let mut args = vec!["build"];
+    let mut args = vec!["build", "-p", "nullnet-client"];
     if opts.release {
         args.push("--release");
         set_ebpf_build_base_dir("release");
@@ -63,7 +63,8 @@ pub fn lint() -> Result<(), anyhow::Error> {
     let status = Command::new("cargo")
         .args([
             "clippy",
-            "--workspace",
+            "-p",
+            "nullnet-client",
             "--all-features",
             "--",
             "-D",

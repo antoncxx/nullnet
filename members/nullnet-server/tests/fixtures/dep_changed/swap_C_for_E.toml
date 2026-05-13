@@ -1,0 +1,7 @@
+[[services]]
+name = "A"
+proxy_dependencies = ["B", "E"]
+
+[[services]]
+name = "D"
+proxy_dependencies = ["C"]

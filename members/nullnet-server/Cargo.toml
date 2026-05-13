@@ -1,0 +1,23 @@
+[package]
+name = "nullnet-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+tonic = { workspace = true, features = ["_tls-any", "tls-native-roots"] }
+prost.workspace = true
+tonic-prost.workspace = true
+nullnet-liberror.workspace = true
+nullnet-grpc-lib.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "fs"] }
+ctrlc = { version = "3.5.2", features = ["termination"] }
+serde = { workspace = true, features = ["derive"] }
+toml.workspace = true
+uuid = { version = "1.23.0", features = ["v4"] }
+ipnetwork.workspace = true
+notify.workspace = true
+gag.workspace = true
+chrono.workspace = true

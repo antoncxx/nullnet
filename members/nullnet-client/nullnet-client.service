@@ -1,0 +1,13 @@
+[Unit]
+Description=Nullnet client
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/nullnet/members/nullnet-client
+EnvironmentFile=/root/nullnet/members/nullnet-client/.env
+ExecStart=/root/nullnet/target/release/nullnet-client
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

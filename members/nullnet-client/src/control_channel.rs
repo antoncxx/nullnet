@@ -281,14 +281,9 @@ fn add_host_mapping(hm: &HostMapping, docker_container: Option<&str>) -> Result<
     let path = "/etc/hosts";
     let entry = format!("{} {}", hm.ip, hm.name);
 
-    // parse each line IP and name: if name exists replace the line, else append
-    let content = std::fs::read_to_string(path).handle_err(location!())?;
-    std::fs::write(path, upsert_hosts_entry(&content, &hm.name, &entry)).handle_err(location!())?;
-
-    // apply the same upsert inside the container — the container's /etc/hosts
-    // has its own contents (Docker manages a few entries there), so we read
-    // it, run the same line loop, and write back.
     if let Some(container) = docker_container {
+        // container-targeted: the resolver that needs this name lives inside
+        // the container, so write only there and leave the host's file alone.
         let cat = std::process::Command::new("docker")
             .args(["exec", container, "cat", path])
             .output()
@@ -313,6 +308,11 @@ fn add_host_mapping(hm: &HostMapping, docker_container: Option<&str>) -> Result<
                 .handle_err(location!())?;
         }
         let _ = child.wait();
+    } else {
+        // host-targeted: upsert into the host's /etc/hosts
+        let content = std::fs::read_to_string(path).handle_err(location!())?;
+        std::fs::write(path, upsert_hosts_entry(&content, &hm.name, &entry))
+            .handle_err(location!())?;
     }
 
     Ok(())
@@ -336,12 +336,9 @@ fn upsert_hosts_entry(content: &str, name: &str, entry: &str) -> String {
 fn remove_host_mapping(hm: &HostMapping, docker_container: Option<&str>) -> Result<(), Error> {
     let path = "/etc/hosts";
 
-    // drop any line in the host file referencing this name
-    let content = std::fs::read_to_string(path).handle_err(location!())?;
-    std::fs::write(path, remove_hosts_entry(&content, &hm.name)).handle_err(location!())?;
-
-    // apply the same removal inside the container's /etc/hosts
     if let Some(container) = docker_container {
+        // container-targeted: setup only wrote inside the container, so the
+        // matching removal is container-only too.
         let cat = std::process::Command::new("docker")
             .args(["exec", container, "cat", path])
             .output()
@@ -366,6 +363,10 @@ fn remove_host_mapping(hm: &HostMapping, docker_container: Option<&str>) -> Resu
                 .handle_err(location!())?;
         }
         let _ = child.wait();
+    } else {
+        // host-targeted: drop any line in the host file referencing this name
+        let content = std::fs::read_to_string(path).handle_err(location!())?;
+        std::fs::write(path, remove_hosts_entry(&content, &hm.name)).handle_err(location!())?;
     }
 
     Ok(())

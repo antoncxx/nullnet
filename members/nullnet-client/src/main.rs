@@ -7,6 +7,7 @@ use crate::ebpf::triggers::TriggersState;
 use crate::env::{CONTROL_SERVICE_ADDR, CONTROL_SERVICE_PORT, ETH_NAME};
 use crate::forward::receive::receive;
 use crate::forward::send::send;
+use crate::host_mappings::HostMappingsState;
 use crate::local_endpoints::LocalEndpoints;
 use crate::peers::peer::Peers;
 use clap::Parser;
@@ -32,6 +33,7 @@ mod craft;
 mod ebpf;
 mod env;
 mod forward;
+mod host_mappings;
 mod local_endpoints;
 mod peers;
 
@@ -100,11 +102,20 @@ async fn main() -> Result<(), Error> {
     let triggers_state_cc = triggers_state.clone();
     let triggers_state_tr = triggers_state.clone();
 
+    // remember /etc/hosts entries installed at setup so teardown can undo them
+    let host_mappings_state = Arc::new(HostMappingsState::default());
+
     // listen on the gRPC control channel
     tokio::spawn(async move {
-        control_channel(grpc_server2, peers_2, rtnetlink_handle, triggers_state_cc)
-            .await
-            .expect("Control channel failed");
+        control_channel(
+            grpc_server2,
+            peers_2,
+            rtnetlink_handle,
+            triggers_state_cc,
+            host_mappings_state,
+        )
+        .await
+        .expect("Control channel failed");
     });
 
     // observe outgoing dependency-port traffic via eBPF; the observer's

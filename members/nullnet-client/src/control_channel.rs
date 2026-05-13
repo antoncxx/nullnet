@@ -1,5 +1,6 @@
 use crate::commands::{RtNetLinkHandle, configure_access_port, dnat, remove_vlan};
 use crate::ebpf::triggers::TriggersState;
+use crate::host_mappings::HostMappingsState;
 use crate::peers::peer::{Peers, VethKey};
 use ipnetwork::Ipv4Network;
 use nullnet_grpc_lib::NullnetGrpcInterface;
@@ -17,6 +18,7 @@ pub(crate) async fn control_channel(
     peers: Arc<RwLock<Peers>>,
     rtnetlink_handle: RtNetLinkHandle,
     triggers_state: Arc<TriggersState>,
+    host_mappings_state: Arc<HostMappingsState>,
 ) -> Result<(), Error> {
     let (outbound, grpc_rx) = mpsc::channel(64);
     let mut inbound = server
@@ -28,27 +30,47 @@ pub(crate) async fn control_channel(
         let rtnetlink_handle = rtnetlink_handle.clone();
         let peers = peers.clone();
         let outbound = outbound.clone();
+        let host_mappings_state = host_mappings_state.clone();
         match message.message {
             Some(net_message::Message::VlanSetup(vlan_setup)) => {
                 tokio::spawn(async move {
-                    let _ = handle_vlan_setup(vlan_setup, rtnetlink_handle, peers, outbound).await;
+                    let _ = handle_vlan_setup(
+                        vlan_setup,
+                        rtnetlink_handle,
+                        peers,
+                        outbound,
+                        host_mappings_state,
+                    )
+                    .await;
                 });
             }
             Some(net_message::Message::VlanTeardown(vlan_teardown)) => {
                 tokio::spawn(async move {
-                    let _ = handle_vlan_teardown(vlan_teardown, rtnetlink_handle, peers).await;
+                    let _ = handle_vlan_teardown(
+                        vlan_teardown,
+                        rtnetlink_handle,
+                        peers,
+                        host_mappings_state,
+                    )
+                    .await;
                 });
             }
             Some(net_message::Message::VxlanSetup(vxlan_setup)) => {
                 let triggers_state = triggers_state.clone();
                 tokio::spawn(async move {
-                    let _ = handle_vxlan_setup(vxlan_setup, outbound, triggers_state).await;
+                    let _ = handle_vxlan_setup(
+                        vxlan_setup,
+                        outbound,
+                        triggers_state,
+                        host_mappings_state,
+                    )
+                    .await;
                 });
             }
             Some(net_message::Message::VxlanTeardown(vxlan_teardown)) => {
                 let triggers_state = triggers_state.clone();
                 tokio::spawn(async move {
-                    handle_vxlan_teardown(vxlan_teardown, triggers_state);
+                    handle_vxlan_teardown(vxlan_teardown, triggers_state, host_mappings_state);
                 });
             }
             None => {}
@@ -63,6 +85,7 @@ async fn handle_vlan_setup(
     rtnetlink_handle: RtNetLinkHandle,
     peers: Arc<RwLock<Peers>>,
     outbound: Sender<MsgId>,
+    host_mappings_state: Arc<HostMappingsState>,
 ) -> Result<(), Error> {
     let msg_id = &message
         .msg_id
@@ -104,6 +127,7 @@ async fn handle_vlan_setup(
     // add host mapping if needed
     if let Some(host_mapping) = &message.host_mapping {
         let _ = add_host_mapping(host_mapping, None);
+        host_mappings_state.record_vlan(vlan_id, host_mapping.clone());
     }
 
     // acknowledge message
@@ -116,6 +140,7 @@ async fn handle_vlan_teardown(
     message: VlanTeardown,
     rtnetlink_handle: RtNetLinkHandle,
     peers: Arc<RwLock<Peers>>,
+    host_mappings_state: Arc<HostMappingsState>,
 ) -> Result<(), Error> {
     let vlan_id = u16::try_from(message.vlan_id).handle_err(location!())?;
 
@@ -132,6 +157,11 @@ async fn handle_vlan_teardown(
     // remove peer
     peers.write().await.remove(vlan_id);
 
+    // remove host mapping if one was installed at setup
+    if let Some(host_mapping) = host_mappings_state.take_vlan(vlan_id) {
+        let _ = remove_host_mapping(&host_mapping, None);
+    }
+
     Ok(())
 }
 
@@ -139,6 +169,7 @@ async fn handle_vxlan_setup(
     message: VxlanSetup,
     outbound: Sender<MsgId>,
     triggers_state: Arc<TriggersState>,
+    host_mappings_state: Arc<HostMappingsState>,
 ) -> Result<(), Error> {
     let msg_id = &message
         .msg_id
@@ -187,6 +218,11 @@ async fn handle_vxlan_setup(
     // add host mapping if needed
     if let Some(host_mapping) = &message.host_mapping {
         let _ = add_host_mapping(host_mapping, message.docker_container.as_deref());
+        host_mappings_state.record_vxlan(
+            vxlan_id,
+            host_mapping.clone(),
+            message.docker_container.clone(),
+        );
 
         // backend-entry edge: install DNAT(dnat_port -> overlay_ip) so the
         // initiator's traffic on that local port is steered into the new VXLAN
@@ -205,10 +241,20 @@ async fn handle_vxlan_setup(
     Ok(())
 }
 
-fn handle_vxlan_teardown(message: VxlanTeardown, triggers_state: Arc<TriggersState>) {
+fn handle_vxlan_teardown(
+    message: VxlanTeardown,
+    triggers_state: Arc<TriggersState>,
+    host_mappings_state: Arc<HostMappingsState>,
+) {
     // remove DNAT before tearing the tunnel down so existing flows reset cleanly
     if let Some((port, overlay_ip)) = triggers_state.remove_by_vxlan(message.vxlan_id) {
         dnat::remove(port, overlay_ip);
+    }
+
+    // remove host mapping if one was installed at setup
+    if let Some((host_mapping, docker_container)) = host_mappings_state.take_vxlan(message.vxlan_id)
+    {
+        let _ = remove_host_mapping(&host_mapping, docker_container.as_deref());
     }
 
     // teardown VXLAN on this machine
@@ -284,5 +330,52 @@ fn upsert_hosts_entry(content: &str, name: &str, entry: &str) -> String {
     if !found {
         lines.push(entry.to_string());
     }
+    lines.join("\n") + "\n"
+}
+
+fn remove_host_mapping(hm: &HostMapping, docker_container: Option<&str>) -> Result<(), Error> {
+    let path = "/etc/hosts";
+
+    // drop any line in the host file referencing this name
+    let content = std::fs::read_to_string(path).handle_err(location!())?;
+    std::fs::write(path, remove_hosts_entry(&content, &hm.name)).handle_err(location!())?;
+
+    // apply the same removal inside the container's /etc/hosts
+    if let Some(container) = docker_container {
+        let cat = std::process::Command::new("docker")
+            .args(["exec", container, "cat", path])
+            .output()
+            .handle_err(location!())?;
+        let content = remove_hosts_entry(&String::from_utf8_lossy(&cat.stdout), &hm.name);
+        let mut child = std::process::Command::new("docker")
+            .args([
+                "exec",
+                "-i",
+                container,
+                "sh",
+                "-c",
+                &format!("cat > {path}"),
+            ])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .handle_err(location!())?;
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            stdin
+                .write_all(content.as_bytes())
+                .handle_err(location!())?;
+        }
+        let _ = child.wait();
+    }
+
+    Ok(())
+}
+
+fn remove_hosts_entry(content: &str, name: &str) -> String {
+    let lines: Vec<String> = content
+        .lines()
+        .filter(|line| !line.split_whitespace().skip(1).any(|tok| tok == name))
+        .map(ToString::to_string)
+        .collect();
     lines.join("\n") + "\n"
 }

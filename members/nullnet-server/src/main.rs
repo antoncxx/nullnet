@@ -1,5 +1,6 @@
 mod env;
 mod graphviz;
+mod http_server;
 mod net;
 mod net_id_pool;
 mod nullnet_grpc_impl;
@@ -33,14 +34,17 @@ async fn main() -> Result<(), Error> {
 
     let mut server = Server::builder();
 
-    server
-        .add_service(
-            NullnetGrpcServer::new(init_nullnet().await?)
-                .max_decoding_message_size(50 * 1024 * 1024),
-        )
-        .serve(addr)
-        .await
-        .handle_err(location!())?;
+    tokio::select! {
+        result = server
+            .add_service(
+                NullnetGrpcServer::new(init_nullnet().await?)
+                    .max_decoding_message_size(50 * 1024 * 1024),
+            )
+            .serve(addr) => {
+            result.handle_err(location!())?;
+        }
+        () = http_server::serve() => {}
+    }
 
     Ok(())
 }

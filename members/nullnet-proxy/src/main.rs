@@ -9,6 +9,7 @@ use pingora_core::server::Server;
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_core::{Error, ErrorType, Result};
 use pingora_proxy::{ProxyHttp, Session};
+use std::process;
 use std::thread;
 use std::time::Instant;
 
@@ -91,6 +92,12 @@ async fn main() -> Result<(), nullnet_liberror::Error> {
     // } else {
     //     println!("Failed to redirect stdout and stderr to file, logs will be printed to console");
     // }
+
+    // handle termination signals: SIGINT, SIGTERM, SIGHUP
+    ctrlc::set_handler(move || {
+        process::exit(1);
+    })
+    .handle_err(location!())?;
 
     let proxy_address = format!("0.0.0.0:{PROXY_PORT}");
 

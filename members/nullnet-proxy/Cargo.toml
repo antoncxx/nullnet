@@ -12,5 +12,6 @@ pingora-proxy = "0.8.0"
 nullnet-grpc-lib.workspace = true
 nullnet-liberror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+ctrlc = { version = "3.5.2", features = ["termination"] }
 gag.workspace = true
 chrono.workspace = true

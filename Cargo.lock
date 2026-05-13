@@ -1985,6 +1985,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "ctrlc",
  "gag",
  "nullnet-grpc-lib",
  "nullnet-liberror",

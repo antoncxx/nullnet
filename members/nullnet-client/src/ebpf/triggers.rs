@@ -1,13 +1,20 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// How long a `Pending` entry survives before it can be retriggered.
+/// Bounds the time we wait for a server VxlanSetup that may never arrive
+/// (e.g., server returned ok without dispatching a setup, or the message
+/// was lost).
+const PENDING_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Per-trigger-port lifecycle:
 /// - `Pending`: backend_trigger fired, waiting for the server to set up the chain.
 /// - `Active`: VXLAN is up and DNAT is installed. Stores the bookkeeping
 ///   needed to tear DNAT down when the matching VxlanTeardown arrives.
 pub enum Lifecycle {
-    Pending,
+    Pending { since: Instant },
     Active { vxlan_id: u32, overlay_ip: Ipv4Addr },
 }
 
@@ -18,13 +25,22 @@ pub struct TriggersState {
 
 impl TriggersState {
     /// Returns true if the caller should fire `backend_trigger` for this port;
-    /// false if a trigger is already pending or active.
+    /// false if a trigger is already pending (within timeout) or active.
     pub fn try_mark_pending(&self, port: u16) -> bool {
         let mut by_port = self.by_port.lock().unwrap();
-        if by_port.contains_key(&port) {
-            return false;
+        match by_port.get(&port) {
+            Some(Lifecycle::Active { .. }) => return false,
+            Some(Lifecycle::Pending { since }) if since.elapsed() < PENDING_TIMEOUT => {
+                return false;
+            }
+            _ => {}
         }
-        by_port.insert(port, Lifecycle::Pending);
+        by_port.insert(
+            port,
+            Lifecycle::Pending {
+                since: Instant::now(),
+            },
+        );
         true
     }
 
@@ -53,7 +69,7 @@ impl TriggersState {
         })?;
         match by_port.remove(&port)? {
             Lifecycle::Active { overlay_ip, .. } => Some((port, overlay_ip)),
-            Lifecycle::Pending => None,
+            Lifecycle::Pending { .. } => None,
         }
     }
 }

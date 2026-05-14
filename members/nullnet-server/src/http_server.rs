@@ -44,10 +44,8 @@ async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
             match UiAssets::get("index.html") {
                 Some(content) => {
                     let mut res = Response::new(axum::body::Body::from(content.data));
-                    res.headers_mut().insert(
-                        header::CONTENT_TYPE,
-                        HeaderValue::from_static("text/html"),
-                    );
+                    res.headers_mut()
+                        .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html"));
                     res
                 }
                 None => Response::builder()

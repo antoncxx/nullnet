@@ -34,16 +34,22 @@ async fn main() -> Result<(), Error> {
 
     let mut server = Server::builder();
 
+    let nullnet = init_nullnet().await?;
+    let app_state = http_server::AppState {
+        services: nullnet.services().clone(),
+        orchestrator: nullnet.orchestrator().clone(),
+    };
+
     tokio::select! {
         result = server
             .add_service(
-                NullnetGrpcServer::new(init_nullnet().await?)
+                NullnetGrpcServer::new(nullnet)
                     .max_decoding_message_size(50 * 1024 * 1024),
             )
             .serve(addr) => {
             result.handle_err(location!())?;
         }
-        () = http_server::serve() => {}
+        () = http_server::serve(app_state) => {}
     }
 
     Ok(())

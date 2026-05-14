@@ -495,6 +495,14 @@ impl NullnetGrpcImpl {
         Ok(())
     }
 
+    pub(crate) fn services(&self) -> &Arc<RwLock<HashMap<String, ServiceInfo>>> {
+        &self.services
+    }
+
+    pub(crate) fn orchestrator(&self) -> &Orchestrator {
+        &self.orchestrator
+    }
+
     pub(crate) async fn apply_services_list(
         &self,
         sender_ip: IpAddr,
@@ -734,14 +742,6 @@ impl NullnetGrpcImpl {
             services: Arc::new(RwLock::new(services)),
             orchestrator: Orchestrator::new(),
         }
-    }
-
-    pub(crate) fn orchestrator(&self) -> &Orchestrator {
-        &self.orchestrator
-    }
-
-    pub(crate) fn services(&self) -> &Arc<RwLock<HashMap<String, ServiceInfo>>> {
-        &self.services
     }
 }
 

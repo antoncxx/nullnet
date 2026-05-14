@@ -12,5 +12,9 @@ struct PoolJson {
 
 pub(super) async fn pool_handler(State(state): State<AppState>) -> impl IntoResponse {
     let (total, in_use, free) = state.orchestrator.pool_stats().await;
-    axum::Json(PoolJson { total, in_use, free })
+    axum::Json(PoolJson {
+        total,
+        in_use,
+        free,
+    })
 }

@@ -59,6 +59,13 @@ impl NetIdPool {
             self.freed.insert(id);
         }
     }
+
+    /// Returns (total_capacity, in_use, free).
+    pub(crate) fn stats(&self) -> (u32, u32, u32) {
+        let capacity = *MAX_NET_ID - MIN_NET_ID + 1;
+        let in_use = (self.next_fresh - MIN_NET_ID) - self.freed.len() as u32;
+        (capacity, in_use, capacity - in_use)
+    }
 }
 
 #[cfg(test)]
@@ -122,5 +129,57 @@ mod tests {
         pool.free(100); // below MIN_NET_ID
         pool.free(*MAX_NET_ID + 1); // above MAX_NET_ID
         assert!(pool.freed.is_empty());
+    }
+
+    #[test]
+    fn test_stats_fresh_pool() {
+        let pool = NetIdPool::new();
+        let (total, in_use, free) = pool.stats();
+        assert!(total > 0);
+        assert_eq!(in_use, 0);
+        assert_eq!(free, total);
+    }
+
+    #[test]
+    fn test_stats_after_allocations() {
+        let mut pool = NetIdPool::new();
+        pool.allocate();
+        pool.allocate();
+        pool.allocate();
+        let (total, in_use, free) = pool.stats();
+        assert_eq!(in_use, 3);
+        assert_eq!(free, total - 3);
+    }
+
+    #[test]
+    fn test_stats_free_reduces_in_use() {
+        let mut pool = NetIdPool::new();
+        let id = pool.allocate().unwrap();
+        pool.allocate();
+        pool.allocate();
+        pool.free(id);
+        let (total, in_use, free) = pool.stats();
+        assert_eq!(in_use, 2);
+        assert_eq!(free, total - 2);
+    }
+
+    #[test]
+    fn test_stats_exhausted_pool() {
+        let mut pool = NetIdPool::new();
+        pool.next_fresh = *MAX_NET_ID + 1;
+        let (total, in_use, free) = pool.stats();
+        assert_eq!(in_use, total);
+        assert_eq!(free, 0);
+    }
+
+    #[test]
+    fn test_stats_total_equals_in_use_plus_free() {
+        let mut pool = NetIdPool::new();
+        pool.allocate();
+        let id = pool.allocate().unwrap();
+        pool.allocate();
+        pool.free(id);
+        let (total, in_use, free) = pool.stats();
+        assert_eq!(total, in_use + free);
     }
 }

@@ -13,18 +13,14 @@ pub(crate) async fn events_stream_handler(
 
     let backfill_stream = stream::iter(backfill.into_iter().map(|e| {
         Ok::<_, Infallible>(
-            SseEvent::default()
-                .event(e.kind())
-                .data(serde_json::to_string(&e).unwrap_or_default()),
+            SseEvent::default().data(serde_json::to_string(&e).unwrap_or_default()),
         )
     }));
 
     let live_stream = BroadcastStream::new(rx).filter_map(|result| async move {
         result.ok().map(|e| {
             Ok::<_, Infallible>(
-                SseEvent::default()
-                    .event(e.kind())
-                    .data(serde_json::to_string(&e).unwrap_or_default()),
+                SseEvent::default().data(serde_json::to_string(&e).unwrap_or_default()),
             )
         })
     });

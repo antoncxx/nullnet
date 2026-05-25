@@ -12,9 +12,7 @@ pub(crate) async fn events_stream_handler(
     let rx = state.events.subscribe();
 
     let backfill_stream = stream::iter(backfill.into_iter().map(|e| {
-        Ok::<_, Infallible>(
-            SseEvent::default().data(serde_json::to_string(&e).unwrap_or_default()),
-        )
+        Ok::<_, Infallible>(SseEvent::default().data(serde_json::to_string(&e).unwrap_or_default()))
     }));
 
     let live_stream = BroadcastStream::new(rx).filter_map(|result| async move {

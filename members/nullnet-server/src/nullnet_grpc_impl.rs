@@ -617,13 +617,19 @@ impl NullnetGrpcImpl {
                 continue;
             };
             for (name, port, docker_container) in list {
+                let is_new = stack_map
+                    .get(name)
+                    .map(|si| !si.has_replica(sender_ip, docker_container.as_deref()))
+                    .unwrap_or(false);
                 stack_map.entry(name.clone()).and_modify(|si| {
                     si.add_replica(sender_ip, *port, docker_container.clone());
                 });
-                self.orchestrator
-                    .events
-                    .emit(Event::service_registered(name.clone(), stack.clone()))
-                    .await;
+                if is_new {
+                    self.orchestrator
+                        .events
+                        .emit(Event::service_registered(name.clone(), stack.clone()))
+                        .await;
+                }
             }
         }
 

@@ -160,13 +160,6 @@ export default function Events() {
   pausedRef.current = paused;
 
   useEffect(() => {
-    fetch('/api/events')
-      .then(r => r.json())
-      .then((data: EventJson[]) => setEvents(data))
-      .catch(() => {});
-  }, []);
-
-  useEffect(() => {
     const es = new EventSource('/api/events/stream');
 
     es.onmessage = (ev) => {

@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "nullnet eBPF"
 license = "AGPL-3.0-only"
 edition = "2024"
-repository = "https://github.com/NullNet-ai/nullnet-client"
+repository = "https://github.com/NullNet-ai/nullnet"
 
 [dependencies]
 aya-ebpf = "0.1.1"

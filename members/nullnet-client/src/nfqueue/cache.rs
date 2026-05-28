@@ -4,6 +4,7 @@ use std::process::Stdio;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::sync::Notify;
 
 /// First 12 hex chars of `NetworkSettings.SandboxID` are what Docker uses
 /// in `gateway_<id>` endpoint names on docker_gwbridge — that's the join
@@ -273,13 +274,15 @@ fn strip_cidr_to_ipv4(ip_with_mask: &str) -> Option<Ipv4Addr> {
 }
 
 /// Spawn the long-running `docker events` watcher. Triggers a refresh after
-/// every container start/die. If docker isn't installed or the subprocess
-/// can't be spawned, the task logs and exits — listener falls back to the
-/// initial cache snapshot. Restarts the subprocess on unexpected exit.
-pub fn spawn_events_watcher(cache: BridgeIpCache) {
+/// every container start/die and pokes `docker_changed` so the
+/// declare-services loop in `main` re-runs immediately. If docker isn't
+/// installed or the subprocess can't be spawned, the task logs and exits —
+/// listener falls back to the initial cache snapshot. Restarts the
+/// subprocess on unexpected exit.
+pub fn spawn_events_watcher(cache: BridgeIpCache, docker_changed: Arc<Notify>) {
     tokio::spawn(async move {
         loop {
-            if let Err(e) = run_events_loop(&cache).await {
+            if let Err(e) = run_events_loop(&cache, &docker_changed).await {
                 eprintln!("[nfqueue/cache] events watcher: {e}; restarting in 5s");
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             }
@@ -287,7 +290,7 @@ pub fn spawn_events_watcher(cache: BridgeIpCache) {
     });
 }
 
-async fn run_events_loop(cache: &BridgeIpCache) -> Result<(), String> {
+async fn run_events_loop(cache: &BridgeIpCache, docker_changed: &Notify) -> Result<(), String> {
     let mut child = tokio::process::Command::new("docker")
         .args([
             "events",
@@ -337,6 +340,9 @@ async fn run_events_loop(cache: &BridgeIpCache) -> Result<(), String> {
         // full refresh. Cheap enough: a few processes per event.
         println!("[nfqueue/cache] docker event: {line} — refreshing");
         cache.refresh().await;
+        // Cache now reflects the new task; kick the declare-services
+        // loop so the ipset catches up before the new task dials.
+        docker_changed.notify_one();
     }
 
     // stdout closed — wait for the child to exit cleanly so we get an

@@ -9,6 +9,7 @@ use listener::{HANDLER_CONCURRENCY, ListenerCtx, spawn_recv_thread};
 use nullnet_grpc_lib::NullnetGrpcInterface;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
+use tokio::sync::Notify;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -29,16 +30,21 @@ pub fn spawn_listener(
     grpc: NullnetGrpcInterface,
     triggers_state: Arc<TriggersState>,
     config_rx: UnboundedReceiver<HashMap<u16, String>>,
+    docker_changed: Arc<Notify>,
 ) {
     let cache = BridgeIpCache::new();
     let port_to_service: Arc<RwLock<HashMap<u16, String>>> = Arc::new(RwLock::new(HashMap::new()));
 
-    // Initial cache populate + long-running docker-events watcher.
+    // Initial cache populate + long-running docker-events watcher. The
+    // watcher pings `docker_changed` after every refresh so the
+    // declare-services loop in `main` can immediately re-declare and
+    // re-populate the ipset — closing the window where a fresh task
+    // might fire a SYN before its trigger port is being watched.
     {
         let bridge_cache = cache.clone();
         tokio::spawn(async move {
             bridge_cache.refresh().await;
-            cache::spawn_events_watcher(bridge_cache);
+            cache::spawn_events_watcher(bridge_cache, docker_changed);
         });
     }
 

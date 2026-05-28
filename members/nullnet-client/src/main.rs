@@ -22,8 +22,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{panic, process};
-use tokio::sync::RwLock;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{Notify, RwLock};
 use tun_rs::{DeviceBuilder, Layer};
 
 mod cli;
@@ -125,12 +125,27 @@ async fn main() -> Result<(), Error> {
     // with the resolved initiator container, waits for VxlanSetup to install
     // DNAT, then verdicts ACCEPT so the original packet hits the new chain.
     let (config_tx, config_rx) = tokio::sync::mpsc::unbounded_channel::<HashMap<u16, String>>();
-    nfqueue::spawn_listener(grpc_server3, triggers_state, config_rx);
+
+    // Poked by the cache's docker-events watcher after every container
+    // start/die so `declare_services` re-runs immediately instead of
+    // waiting up to its 10 s polling interval. Without this, a freshly
+    // started task can fire its first SYN to a trigger port before that
+    // port has been added back to the ipset, so NFQUEUE misses the SYN,
+    // the kernel routes it to the public-IP DNS resolution, and the app
+    // gets ECHO/EHOSTUNREACH before we ever get a chance to DNAT.
+    let docker_changed = Arc::new(Notify::new());
+
+    nfqueue::spawn_listener(
+        grpc_server3,
+        triggers_state,
+        config_rx,
+        docker_changed.clone(),
+    );
 
     // declare services + push the port→service map to the NFQUEUE listener
     // on each refresh
     tokio::spawn(async move {
-        declare_services(grpc_server, config_tx)
+        declare_services(grpc_server, config_tx, docker_changed)
             .await
             .expect("Failed to declare services");
     });
@@ -228,6 +243,7 @@ async fn grpc_init() -> Result<NullnetGrpcInterface, Error> {
 async fn declare_services(
     grpc_server: NullnetGrpcInterface,
     config_tx: UnboundedSender<HashMap<u16, String>>,
+    docker_changed: Arc<Notify>,
 ) -> Result<(), Error> {
     loop {
         // read services from file
@@ -290,8 +306,13 @@ async fn declare_services(
             return Ok(());
         }
 
-        // wait before re-declaring services
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        // Wait up to 10 s before re-declaring, but cut the wait short on a
+        // docker container start/die — that's what populates the ipset for
+        // a freshly-started task before its app dials a trigger port.
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+            _ = docker_changed.notified() => {}
+        }
     }
 }
 

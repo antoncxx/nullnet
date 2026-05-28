@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 use std::process::Stdio;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
 /// First 12 hex chars of `NetworkSettings.SandboxID` are what Docker uses
 /// in `gateway_<id>` endpoint names on docker_gwbridge — that's the join
@@ -297,17 +297,36 @@ async fn run_events_loop(cache: &BridgeIpCache) -> Result<(), String> {
             "event=start",
             "--filter",
             "event=die",
+            // `.Action` (start/die) is the modern field; the legacy
+            // `.Status` was removed in newer daemons (template eval errors
+            // "can't evaluate field Status in type *events.Message").
             "--format",
-            "{{.Status}}",
+            "{{.Action}}",
         ])
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("spawn docker events: {e}"))?;
     let stdout = child
         .stdout
         .take()
         .ok_or_else(|| "docker events: no stdout pipe".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "docker events: no stderr pipe".to_string())?;
+
+    // Drain stderr concurrently so we can fold it into the error message
+    // when the stream ends. Without this the failure mode (permission
+    // denied, bad filter, daemon disconnect, etc.) is invisible.
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let mut reader = stderr;
+        let _ = reader.read_to_end(&mut buf).await;
+        String::from_utf8_lossy(&buf).into_owned()
+    });
+
     let mut lines = BufReader::new(stdout).lines();
     while let Some(line) = lines
         .next_line()
@@ -319,7 +338,17 @@ async fn run_events_loop(cache: &BridgeIpCache) -> Result<(), String> {
         println!("[nfqueue/cache] docker event: {line} — refreshing");
         cache.refresh().await;
     }
-    Err("docker events stream ended".to_string())
+
+    // stdout closed — wait for the child to exit cleanly so we get an
+    // exit status, then collect whatever stderr came through.
+    let status = child.wait().await.map_err(|e| format!("wait: {e}"))?;
+    let stderr_text = stderr_task.await.unwrap_or_default();
+    let stderr_trimmed = stderr_text.trim();
+    if stderr_trimmed.is_empty() {
+        Err(format!("docker events exited {status} (no stderr)"))
+    } else {
+        Err(format!("docker events exited {status}: {stderr_trimmed}"))
+    }
 }
 
 #[cfg(test)]

@@ -6,9 +6,9 @@ use ipnetwork::Ipv4Network;
 use nullnet_grpc_lib::NullnetGrpcInterface;
 use nullnet_grpc_lib::nullnet_grpc::{
     AgentControlChannelAckFailed, AgentControlChannelClosed, AgentControlChannelEstablished,
-    AgentDnatInstallFailed, AgentHostMappingFailed, AgentVlanSetupCompleted, AgentVlanSetupFailed,
-    AgentVlanTeardownFailed, AgentVxlanSetupCompleted, AgentVxlanSetupFailed,
-    AgentVxlanTeardownFailed,
+    AgentDnatInstallFailed, AgentDnatRemovalFailed, AgentHostMappingFailed,
+    AgentVlanSetupCompleted, AgentVlanSetupFailed, AgentVlanTeardownFailed,
+    AgentVxlanSetupCompleted, AgentVxlanSetupFailed, AgentVxlanTeardownFailed,
 };
 use nullnet_grpc_lib::nullnet_grpc::{
     AgentEvent, HostMapping, MsgId, VlanSetup, VlanTeardown, VxlanSetup, VxlanTeardown,
@@ -350,14 +350,27 @@ async fn handle_vxlan_setup(
         {
             let container_key = message.docker_container.as_deref().unwrap_or("");
             let container_ip = triggers_state.peek_container_ip(container_key, dnat_port);
-            dnat::install(dnat_port, overlay_ip, container_ip);
-            triggers_state.mark_active(
-                container_key,
-                dnat_port,
-                vxlan_id,
-                overlay_ip,
-                container_ip,
-            );
+            // Only promote to Active if the DNAT rule is actually live. Waking
+            // the held packet without it would release the SYN into a missing
+            // rule (→ misroute to the original dest); instead leave it Pending
+            // so the listener drops at ACTIVE_TIMEOUT.
+            if dnat::install(dnat_port, overlay_ip, container_ip) {
+                triggers_state.mark_active(
+                    container_key,
+                    dnat_port,
+                    vxlan_id,
+                    overlay_ip,
+                    container_ip,
+                );
+            } else {
+                fire_event(
+                    &grpc,
+                    AgentEventKind::DnatInstallFailed(AgentDnatInstallFailed {
+                        port: u32::from(dnat_port),
+                        overlay_ip: overlay_ip.to_string(),
+                    }),
+                );
+            }
         } else if message.dnat_port.is_some() {
             // Backend-entry edge with a malformed port or host IP — DNAT
             // can't be installed and the trigger waiter on this host will
@@ -411,7 +424,15 @@ fn handle_vxlan_teardown(
     if let Some((_container, port, overlay_ip, container_ip)) =
         triggers_state.remove_by_vxlan(message.vxlan_id)
     {
-        dnat::remove(port, overlay_ip, container_ip);
+        if !dnat::remove(port, overlay_ip, container_ip) {
+            fire_event(
+                &grpc,
+                AgentEventKind::DnatRemovalFailed(AgentDnatRemovalFailed {
+                    port: u32::from(port),
+                    overlay_ip: overlay_ip.to_string(),
+                }),
+            );
+        }
     }
 
     // remove host mapping if one was installed at setup

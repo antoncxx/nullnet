@@ -3,6 +3,9 @@ use crate::nfqueue::parse::ipv4_src_and_dst_port;
 use crate::triggers::{TriggerState, TriggersState};
 use nfq::{Message, Queue, Verdict};
 use nullnet_grpc_lib::NullnetGrpcInterface;
+use nullnet_grpc_lib::nullnet_grpc::{
+    AgentBackendTriggerSendFailed, AgentEvent, agent_event::Event as AgentEventKind,
+};
 use std::collections::HashMap;
 use std::sync::mpsc::{Sender, TryRecvError};
 use std::sync::{Arc, RwLock};
@@ -248,6 +251,7 @@ async fn decide_verdict(
                     eprintln!(
                         "[nfqueue] backend_trigger '{service}' port {dst_port} container {container}: {e}"
                     );
+                    report_trigger_send_failed(&ctx.grpc, service, dst_port, e);
                     ctx.triggers_state.forget(container, dst_port);
                     Verdict::Drop
                 }
@@ -255,10 +259,39 @@ async fn decide_verdict(
                     eprintln!(
                         "[nfqueue] backend_trigger timeout '{service}' port {dst_port} container {container}"
                     );
+                    report_trigger_send_failed(
+                        &ctx.grpc,
+                        service,
+                        dst_port,
+                        format!("backend_trigger timed out after {TRIGGER_TIMEOUT:?}"),
+                    );
                     ctx.triggers_state.forget(container, dst_port);
                     Verdict::Drop
                 }
             }
         }
     }
+}
+
+/// Fire-and-forget: report a failed `backend_trigger` to the server's event
+/// stream — restores the event the eBPF observer emitted pre-NFQUEUE.
+fn report_trigger_send_failed(
+    grpc: &NullnetGrpcInterface,
+    service: &str,
+    port: u16,
+    error_message: String,
+) {
+    let grpc = grpc.clone();
+    let event = AgentEvent {
+        event: Some(AgentEventKind::BackendTriggerSendFailed(
+            AgentBackendTriggerSendFailed {
+                service_name: service.to_string(),
+                port: u32::from(port),
+                error_message,
+            },
+        )),
+    };
+    tokio::spawn(async move {
+        let _ = grpc.report_event(event).await;
+    });
 }

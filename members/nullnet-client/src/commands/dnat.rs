@@ -30,27 +30,34 @@ pub(crate) fn init() {
 /// real address, the rule is scoped to that source via `-s` so co-located
 /// replicas hit independent chains. `Ipv4Addr::UNSPECIFIED` (0.0.0.0) means
 /// "no source filter" — used by legacy callers that don't know the source.
-pub(crate) fn install(port: u16, overlay_ip: Ipv4Addr, container_ip: Ipv4Addr) {
+/// Returns `false` if any of the per-proto `iptables` rules failed to apply.
+pub(crate) fn install(port: u16, overlay_ip: Ipv4Addr, container_ip: Ipv4Addr) -> bool {
+    let mut ok = true;
     for proto in PROTOS {
-        run_iptables("-A", proto, port, overlay_ip, container_ip);
+        ok &= run_iptables("-A", proto, port, overlay_ip, container_ip);
     }
     flush_conntrack(port);
+    ok
 }
 
-pub(crate) fn remove(port: u16, overlay_ip: Ipv4Addr, container_ip: Ipv4Addr) {
+/// Returns `false` if any of the per-proto `iptables` rules failed to delete.
+pub(crate) fn remove(port: u16, overlay_ip: Ipv4Addr, container_ip: Ipv4Addr) -> bool {
+    let mut ok = true;
     for proto in PROTOS {
-        run_iptables("-D", proto, port, overlay_ip, container_ip);
+        ok &= run_iptables("-D", proto, port, overlay_ip, container_ip);
     }
     flush_conntrack(port);
+    ok
 }
 
+/// Returns `true` on success (rule applied / deleted).
 fn run_iptables(
     action: &str,
     proto: &str,
     port: u16,
     overlay_ip: Ipv4Addr,
     container_ip: Ipv4Addr,
-) {
+) -> bool {
     let port_s = port.to_string();
     let target = format!("{overlay_ip}:{port}");
     let container_ip_s = container_ip.to_string();
@@ -75,14 +82,17 @@ fn run_iptables(
     match status {
         Ok(s) if s.success() => {
             println!("[dnat] iptables {action} {CHAIN} {proto}/{port} -s {src} -> {target}");
+            true
         }
         Ok(s) => {
             eprintln!(
                 "[dnat] iptables {action} {CHAIN} {proto}/{port} -s {src} -> {target} exited {s}"
             );
+            false
         }
         Err(e) => {
             eprintln!("[dnat] iptables {action} {CHAIN} {proto}/{port} -s {src} -> {target}: {e}");
+            false
         }
     }
 }

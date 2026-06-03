@@ -16,8 +16,7 @@ use nullnet_firewall::{DataLink, Firewall, FirewallError, LogLevel};
 use nullnet_grpc_lib::NullnetGrpcInterface;
 use nullnet_grpc_lib::nullnet_grpc::{
     AgentEvent, AgentFirewallRulesLoadFailed, AgentServicesListUpdateFailed,
-    AgentServicesListUpdated, Net, Services,
-    agent_event::Event as AgentEventKind,
+    AgentServicesListUpdated, Net, Services, agent_event::Event as AgentEventKind,
 };
 use nullnet_liberror::{Error, ErrorHandler, Location, location};
 use std::collections::HashMap;

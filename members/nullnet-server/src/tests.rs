@@ -135,7 +135,7 @@ async fn trigger_backend_chain(
     port: u16,
 ) {
     server
-        .handle_backend_trigger(initiator_name, port, initiator_ip)
+        .handle_backend_trigger(initiator_name, port, initiator_ip, None)
         .await
         .expect("backend trigger failed");
 }
@@ -286,7 +286,7 @@ async fn dep_changed_add_E_to_A() {
 
     assert_eq!(
         stack_view(&guard)["A"].proxy_deps(),
-        vec!["B".to_string(), "C".to_string(), "E".to_string()]
+        vec![vec!["B".to_string(), "C".to_string(), "E".to_string()]]
     );
     assert!(stack_view(&guard).contains_key("E"));
     assert!(matches!(
@@ -307,7 +307,10 @@ async fn dep_changed_drop_C_from_A() {
     assert_graphviz(&guard, DEP_CHANGED, "after_drop_C_from_A.dot");
 
     assert!(stack_view(&guard).contains_key("A"));
-    assert_eq!(stack_view(&guard)["A"].proxy_deps(), vec!["B".to_string()]);
+    assert_eq!(
+        stack_view(&guard)["A"].proxy_deps(),
+        vec![vec!["B".to_string()]]
+    );
     assert!(stack_view(&guard).contains_key("C"));
 }
 
@@ -339,7 +342,7 @@ async fn dep_changed_swap_C_for_E() {
 
     assert_eq!(
         stack_view(&guard)["A"].proxy_deps(),
-        vec!["B".to_string(), "E".to_string()]
+        vec![vec!["B".to_string(), "E".to_string()]]
     );
     assert!(stack_view(&guard).contains_key("E"));
     assert!(matches!(
@@ -1902,7 +1905,7 @@ async fn max_networks_different_proxy_bypasses() {
 }
 
 // ===========================================================================
-// triggers_changed: A entry-point with proxy_dependencies=["B"] and
+// triggers_changed: A entry-point with proxy_dependencies=[["B"]] and
 // triggers=[{5555, ["C"]}]; D entry-point with triggers=[{6666, ["C"]}].
 // proxy1→A→B (proxy chain), A→C and D→C (backend chains).
 // ===========================================================================
@@ -2008,7 +2011,7 @@ async fn triggers_changed_drop_D_trigger() {
 
 // ===========================================================================
 // backend_reachability_changed: A entry-point with triggers=[{5555, ["C"]}].
-// Z is also an entry-point with proxy_dependencies=["A","C"], used to keep A
+// Z is also an entry-point with proxy_dependencies=[["A","C"]], used to keep A
 // and C in the map after A loses its [[services]] entry. Z's chains are not
 // activated; it serves only as a config-level reference holder.
 // ===========================================================================
@@ -2064,7 +2067,7 @@ async fn backend_reachability_changed_lose_entry_point_A() {
 
 // ===========================================================================
 // backend_service_unregistered: A entry-point with co-located replicas a1, a2
-// at 1.1.1.1, proxy_dependencies=["B"], triggers=[{5555, ["C"]}]. Tests
+// at 1.1.1.1, proxy_dependencies=[["B"]], triggers=[{5555, ["C"]}]. Tests
 // selective replica/service removal via apply_services_list while backend
 // chains coexist with a proxy chain.
 // ===========================================================================
@@ -2207,6 +2210,131 @@ async fn backend_service_unregistered_drop_C() {
     drop(guard);
 
     assert_net_ids_in_use(&server, 0).await;
+}
+
+// ===========================================================================
+// backend_trigger_disambiguation: A entry-point with co-located replicas
+// a1, a2 at 1.1.1.1, trigger 5555 → C. Drives handle_backend_trigger directly
+// to exercise initiator-replica resolution by (ip, container) — the path the
+// NFQUEUE client takes when it supplies the container name it resolved from
+// the source IP. The other backend tests reach setup_backend_chain with an
+// already-resolved replica, so this is the only coverage of the resolution
+// `.find` itself.
+// ===========================================================================
+
+/// Topology only: A(a1, a2 @ 1.1.1.1), B, C registered, no chains pre-built so
+/// each test owns the trigger that resolves the initiator replica.
+async fn backend_disambiguation_setup() -> NullnetGrpcImpl {
+    let services = load_fixture(BACKEND_SERVICE_UNREGISTERED).await;
+    let server = NullnetGrpcImpl::new_for_test(services);
+
+    let ip_map = HashMap::from([("B", ip(2, 2, 2, 2)), ("C", ip(3, 3, 3, 3))]);
+    register_services(&server, &ip_map, 8080).await;
+
+    // A: co-located replicas a1 and a2 at 1.1.1.1 (Docker Swarm)
+    {
+        let mut services = server.services().write().await;
+        let a = stack_view_mut(&mut services)
+            .get_mut("A")
+            .expect("A in fixture");
+        a.add_replica(ip(1, 1, 1, 1), 8080, Some("a1".into()));
+        a.add_replica(ip(1, 1, 1, 1), 8080, Some("a2".into()));
+    }
+    server
+        .orchestrator()
+        .register_fake_client(ip(1, 1, 1, 1))
+        .await;
+
+    server
+}
+
+/// A container name picks its own replica out of two co-located ones: a trigger
+/// carrying "a2" must build the A(a2)→C chain and leave A(a1) untouched.
+#[tokio::test]
+async fn backend_trigger_disambiguates_colocated_replica_by_container() {
+    let server = backend_disambiguation_setup().await;
+
+    server
+        .handle_backend_trigger("A", 5555, ip(1, 1, 1, 1), Some("a2"))
+        .await
+        .expect("backend trigger for a2 should succeed");
+
+    let guard = server.services().read().await;
+    let ServiceInfo::Registered(reg_c) = &stack_view(&guard)["C"] else {
+        panic!("C should be registered");
+    };
+    let a2_client = crate::services::clients::Client::new_service(
+        "A".to_string(),
+        ip(1, 1, 1, 1),
+        Some("a2".to_string()),
+    );
+    let a1_client = crate::services::clients::Client::new_service(
+        "A".to_string(),
+        ip(1, 1, 1, 1),
+        Some("a1".to_string()),
+    );
+    assert!(
+        reg_c.is_client_setup(&a2_client).is_some(),
+        "A(a2)→C chain should be set up"
+    );
+    assert!(
+        reg_c.is_client_setup(&a1_client).is_none(),
+        "A(a1) must not have a chain — only a2 fired"
+    );
+    assert_eq!(reg_c.client_count(), 1, "exactly one initiator (a2) on C");
+    drop(guard);
+
+    // Only A(a2)→C exists.
+    assert_net_ids_in_use(&server, 1).await;
+}
+
+/// A container name that matches no replica is a hard error — there is NO
+/// fall back to IP-only when a container was supplied, otherwise co-located
+/// replicas would be ambiguous again. Nothing is built.
+#[tokio::test]
+async fn backend_trigger_unknown_container_errors_without_ip_fallback() {
+    let server = backend_disambiguation_setup().await;
+
+    let result = server
+        .handle_backend_trigger("A", 5555, ip(1, 1, 1, 1), Some("ghost"))
+        .await;
+
+    assert!(
+        result.is_err(),
+        "a container that matches no replica must not silently fall back to IP-only"
+    );
+    assert_net_ids_in_use(&server, 0).await;
+}
+
+/// No container (host process / pre-NFQUEUE caller) keeps the IP-only path:
+/// the first replica on the sender IP is chosen.
+#[tokio::test]
+async fn backend_trigger_without_container_falls_back_to_ip_only() {
+    let server = backend_disambiguation_setup().await;
+
+    server
+        .handle_backend_trigger("A", 5555, ip(1, 1, 1, 1), None)
+        .await
+        .expect("IP-only trigger should succeed");
+
+    let guard = server.services().read().await;
+    let ServiceInfo::Registered(reg_c) = &stack_view(&guard)["C"] else {
+        panic!("C should be registered");
+    };
+    // a1 is inserted first, so the IP-only find resolves to it.
+    let a1_client = crate::services::clients::Client::new_service(
+        "A".to_string(),
+        ip(1, 1, 1, 1),
+        Some("a1".to_string()),
+    );
+    assert!(
+        reg_c.is_client_setup(&a1_client).is_some(),
+        "IP-only resolution should pick the first replica (a1)"
+    );
+    assert_eq!(reg_c.client_count(), 1);
+    drop(guard);
+
+    assert_net_ids_in_use(&server, 1).await;
 }
 
 // ===========================================================================
@@ -2492,4 +2620,75 @@ async fn backend_multi_replica_disconnect_swarm_host() {
 
     // A→B and E→B freed; D→B survives = 1
     assert_net_ids_in_use(&server, 1).await;
+}
+
+// ===========================================================================
+// proxy_branches: A fans out into two parallel proxy chains, A→B→C and A→D.
+// Exercises construction (one linear chain per branch) and teardown (the
+// multi-branch walk in collect_dep_chain_edges).
+// ===========================================================================
+
+const PROXY_BRANCHES: &str = "proxy_branches";
+
+async fn proxy_branches_setup() -> NullnetGrpcImpl {
+    let services = load_fixture(PROXY_BRANCHES).await;
+    let server = NullnetGrpcImpl::new_for_test(services);
+
+    let ip_map = HashMap::from([
+        ("A", ip(1, 1, 1, 1)),
+        ("B", ip(2, 2, 2, 2)),
+        ("C", ip(3, 3, 3, 3)),
+        ("D", ip(4, 4, 4, 4)),
+    ]);
+    let proxy = ip(5, 5, 5, 5);
+    register_services(&server, &ip_map, 8080).await;
+    server.orchestrator().register_fake_client(proxy).await;
+
+    setup_proxy_chain(&server, "A", proxy, "10.0.0.1").await;
+
+    // Both branches come up: proxy→A, A→B, B→C, A→D = 4 IDs. If only one
+    // branch were walked, this would be 2 or 3.
+    assert_net_ids_in_use(&server, 4).await;
+
+    server
+}
+
+/// Construction fans out across both branches; the entry point keeps both.
+#[tokio::test]
+async fn proxy_branches_setup_fans_out() {
+    let server = proxy_branches_setup().await;
+
+    let guard = server.services().read().await;
+    assert_eq!(
+        stack_view(&guard)["A"].proxy_deps(),
+        vec![
+            vec!["B".to_string(), "C".to_string()],
+            vec!["D".to_string()],
+        ]
+    );
+    // Every dep across both branches is registered with a replica.
+    for name in ["B", "C", "D"] {
+        assert!(matches!(
+            stack_view(&guard)[name],
+            ServiceInfo::Registered(_)
+        ));
+    }
+}
+
+/// Removing A tears down BOTH branches — the walker must follow each one or
+/// edges leak. Asserts every NET ID is freed.
+#[tokio::test]
+async fn proxy_branches_remove_A_tears_down_both() {
+    let server = proxy_branches_setup().await;
+    let new_config = load_config(PROXY_BRANCHES, "remove_A.toml").await;
+
+    let mut guard = server.services().write().await;
+    apply_config_update(&mut guard, new_config, server.orchestrator()).await;
+    drop(guard);
+
+    // proxy→A, A→B, B→C, A→D all freed = 0 IDs (a single-branch walk would leak).
+    assert_net_ids_in_use(&server, 0).await;
+
+    let guard = server.services().read().await;
+    assert!(!stack_view(&guard).contains_key("A"));
 }

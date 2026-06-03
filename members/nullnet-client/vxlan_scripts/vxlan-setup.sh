@@ -19,6 +19,12 @@ DOCKER_CONTAINER=$8
 
 BR_IP=$(echo $BR_NET | cut -d'/' -f1)
 
+# Overlay MTU: underlay 1500 - 50 (VXLAN encap) = 1450. Set on every interface
+# in the chain so the path is uniformly sized and the kernel advertises a
+# correct TCP MSS / fragments UDP at the right boundary. Complements the
+# TCPMSS clamp installed by the client (mss 1400) — both target the same path.
+OVERLAY_MTU=1450
+
 if [ -n "$DOCKER_CONTAINER" ]; then
     # Docker mode: get the container's PID to enter its network namespace via nsenter
     PID=$(docker inspect -f '{{.State.Pid}}' $DOCKER_CONTAINER)
@@ -36,14 +42,14 @@ fi
 sudo ip link add $NS_NAME-in type veth peer name $NS_NAME-out
 $NS_SET
 $NS_EXEC ip addr add $NS_NET dev $NS_NAME-in
-$NS_EXEC ip link set $NS_NAME-in up
+$NS_EXEC ip link set $NS_NAME-in mtu $OVERLAY_MTU up
 
 # Create the bridge, assign its internal IP, and attach $NS_NAME-out:
 sudo ip link add $BR_NAME type bridge
 sudo ip addr add $BR_NET dev $BR_NAME
-sudo ip link set $BR_NAME up
+sudo ip link set $BR_NAME mtu $OVERLAY_MTU up
 sudo ip link set $NS_NAME-out master $BR_NAME
-sudo ip link set $NS_NAME-out up
+sudo ip link set $NS_NAME-out mtu $OVERLAY_MTU up
 if [ -z "$DOCKER_CONTAINER" ]; then
     # Standalone mode: set default route through the bridge
     $NS_EXEC ip route add default via $BR_IP
@@ -62,13 +68,13 @@ if [ "$LOCAL_IP" == "$REMOTE_IP" ]; then
           LOCAL_VETH="$VETH_C"
       fi
       sudo ip link set "$LOCAL_VETH" master "$BR_NAME"
-      sudo ip link set "$LOCAL_VETH" up
+      sudo ip link set "$LOCAL_VETH" mtu $OVERLAY_MTU up
   else
       # Create the VXLAN tunnel using your physical IP and interface:
       sudo ip link add vxlan-$NS_NAME type vxlan id $VXLAN_ID local $LOCAL_IP remote $REMOTE_IP dstport 4789 # dev ens18
       # Attach the VXLAN to the bridge:
       sudo ip link set vxlan-$NS_NAME master $BR_NAME
-      sudo ip link set vxlan-$NS_NAME up
+      sudo ip link set vxlan-$NS_NAME mtu $OVERLAY_MTU up
   fi
 
 # Enable IP forwarding:

@@ -1,14 +1,14 @@
 use crate::commands::{RtNetLinkHandle, configure_access_port, dnat, remove_vlan};
-use crate::ebpf::triggers::TriggersState;
 use crate::host_mappings::HostMappingsState;
 use crate::peers::peer::{Peers, VethKey};
+use crate::triggers::TriggersState;
 use ipnetwork::Ipv4Network;
 use nullnet_grpc_lib::NullnetGrpcInterface;
 use nullnet_grpc_lib::nullnet_grpc::{
     AgentControlChannelAckFailed, AgentControlChannelClosed, AgentControlChannelEstablished,
-    AgentDnatInstallFailed, AgentHostMappingFailed, AgentVlanSetupCompleted, AgentVlanSetupFailed,
-    AgentVlanTeardownFailed, AgentVxlanSetupCompleted, AgentVxlanSetupFailed,
-    AgentVxlanTeardownFailed,
+    AgentDnatInstallFailed, AgentDnatRemovalFailed, AgentHostMappingFailed,
+    AgentVlanSetupCompleted, AgentVlanSetupFailed, AgentVlanTeardownFailed,
+    AgentVxlanSetupCompleted, AgentVxlanSetupFailed, AgentVxlanTeardownFailed,
 };
 use nullnet_grpc_lib::nullnet_grpc::{
     AgentEvent, HostMapping, MsgId, VlanSetup, VlanTeardown, VxlanSetup, VxlanTeardown,
@@ -333,14 +333,55 @@ async fn handle_vxlan_setup(
         );
 
         // backend-entry edge: install DNAT(dnat_port -> overlay_ip) so the
-        // initiator's traffic on that local port is steered into the new VXLAN
+        // initiator's traffic on that local port is steered into the new
+        // VXLAN.
+        //
+        // Order matters. The NFQUEUE listener is parked on a `Notify` that
+        // `mark_active` fires; once woken it verdicts ACCEPT and the held
+        // packet traverses `nat PREROUTING`. The DNAT rule MUST already be
+        // installed by then, so we:
+        //   1. peek the initiator's bridge IP (stashed at `mark_pending`)
+        //   2. install DNAT with `-s <container_ip>`
+        //   3. mark_active → wakes the waiter, packet released into the new
+        //      rule
         if let Some(dnat_port) = message.dnat_port
             && let Ok(dnat_port) = u16::try_from(dnat_port)
             && let Ok(overlay_ip) = host_mapping.ip.parse::<Ipv4Addr>()
         {
-            dnat::install(dnat_port, overlay_ip);
-            triggers_state.mark_active(dnat_port, vxlan_id, overlay_ip);
+            let container_key = message.docker_container.as_deref().unwrap_or("");
+            let container_ip = triggers_state.peek_container_ip(container_key, dnat_port);
+            // Only promote to Active if the DNAT rule is actually live. Waking
+            // the held packet without it would release the SYN into a missing
+            // rule (→ misroute to the original dest); instead leave it Pending
+            // so the listener drops at ACTIVE_TIMEOUT.
+            if dnat::install(dnat_port, overlay_ip, container_ip) {
+                triggers_state.mark_active(
+                    container_key,
+                    dnat_port,
+                    vxlan_id,
+                    overlay_ip,
+                    container_ip,
+                );
+            } else {
+                fire_event(
+                    &grpc,
+                    AgentEventKind::DnatInstallFailed(AgentDnatInstallFailed {
+                        port: u32::from(dnat_port),
+                        overlay_ip: overlay_ip.to_string(),
+                    }),
+                );
+            }
         } else if message.dnat_port.is_some() {
+            // Backend-entry edge with a malformed port or host IP — DNAT
+            // can't be installed and the trigger waiter on this host will
+            // block until `ACTIVE_TIMEOUT` then drop the held packet. Log
+            // loudly and surface a structured event instead of silently
+            // no-op'ing.
+            eprintln!(
+                "[vxlan_setup] backend entry malformed: dnat_port={:?}, host_mapping.ip={:?}; \
+                 DNAT not installed, trigger waiter will time out",
+                message.dnat_port, host_mapping.ip
+            );
             fire_event(
                 &grpc,
                 AgentEventKind::DnatInstallFailed(AgentDnatInstallFailed {
@@ -378,9 +419,19 @@ fn handle_vxlan_teardown(
     host_mappings_state: Arc<HostMappingsState>,
     grpc: NullnetGrpcInterface,
 ) {
-    // remove DNAT before tearing the tunnel down so existing flows reset cleanly
-    if let Some((port, overlay_ip)) = triggers_state.remove_by_vxlan(message.vxlan_id) {
-        dnat::remove(port, overlay_ip);
+    // remove DNAT before tearing the tunnel down so existing flows reset
+    // cleanly. The `container_ip` matches the `-s` we used at install time.
+    if let Some((_container, port, overlay_ip, container_ip)) =
+        triggers_state.remove_by_vxlan(message.vxlan_id)
+        && !dnat::remove(port, overlay_ip, container_ip)
+    {
+        fire_event(
+            &grpc,
+            AgentEventKind::DnatRemovalFailed(AgentDnatRemovalFailed {
+                port: u32::from(port),
+                overlay_ip: overlay_ip.to_string(),
+            }),
+        );
     }
 
     // remove host mapping if one was installed at setup

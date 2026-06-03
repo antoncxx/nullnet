@@ -3,21 +3,20 @@
 use crate::cli::Args;
 use crate::commands::{RtNetLinkHandle, cleanup_network, setup_br0};
 use crate::control_channel::control_channel;
-use crate::ebpf::triggers::TriggersState;
-use crate::env::{CONTROL_SERVICE_ADDR, CONTROL_SERVICE_PORT, ETH_NAME};
+use crate::env::{CONTROL_SERVICE_ADDR, CONTROL_SERVICE_PORT};
 use crate::forward::receive::receive;
 use crate::forward::send::send;
 use crate::host_mappings::HostMappingsState;
 use crate::local_endpoints::LocalEndpoints;
 use crate::peers::peer::Peers;
+use crate::triggers::TriggersState;
 use clap::Parser;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use nullnet_firewall::{DataLink, Firewall, FirewallError, LogLevel};
 use nullnet_grpc_lib::NullnetGrpcInterface;
 use nullnet_grpc_lib::nullnet_grpc::{
-    AgentBackendTriggerSendFailed, AgentEvent, AgentFirewallRulesLoadFailed,
-    AgentServicesListUpdateFailed, AgentServicesListUpdated, Net, Services,
-    agent_event::Event as AgentEventKind,
+    AgentEvent, AgentFirewallRulesLoadFailed, AgentServicesListUpdateFailed,
+    AgentServicesListUpdated, Net, Services, agent_event::Event as AgentEventKind,
 };
 use nullnet_liberror::{Error, ErrorHandler, Location, location};
 use std::collections::HashMap;
@@ -26,20 +25,21 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{panic, process};
-use tokio::sync::RwLock;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{Notify, RwLock};
 use tun_rs::{DeviceBuilder, Layer};
 
 mod cli;
 mod commands;
 mod control_channel;
 mod craft;
-mod ebpf;
 mod env;
 mod forward;
 mod host_mappings;
 mod local_endpoints;
+mod nfqueue;
 mod peers;
+mod triggers;
 
 pub const FORWARD_PORT: u16 = 9999;
 pub const TAP_NAME: &str = "nullnet0";
@@ -101,10 +101,11 @@ async fn main() -> Result<(), Error> {
 
     print_info(net_type.net());
 
-    // shared dedup state (one trigger pending/active per port until teardown)
+    // shared dedup + waiter state, keyed by (initiator_container, port).
+    // The NFQUEUE listener marks Pending and awaits the Notify; the control
+    // channel marks Active when the matching VxlanSetup lands.
     let triggers_state = Arc::new(TriggersState::default());
     let triggers_state_cc = triggers_state.clone();
-    let triggers_state_tr = triggers_state.clone();
 
     // remember /etc/hosts entries installed at setup so teardown can undo them
     let host_mappings_state = Arc::new(HostMappingsState::default());
@@ -122,50 +123,36 @@ async fn main() -> Result<(), Error> {
         .expect("Control channel failed");
     });
 
-    // observe outgoing dependency-port traffic via eBPF; the observer's
-    // watch-port set is driven by the services-list response from the server.
+    // NFQUEUE listener owns trigger detection: kernel queues the first
+    // packet of each new watched-port flow, listener fires backend_trigger
+    // with the resolved initiator container, waits for VxlanSetup to install
+    // DNAT, then verdicts ACCEPT so the original packet hits the new chain.
     let (config_tx, config_rx) = tokio::sync::mpsc::unbounded_channel::<HashMap<u16, String>>();
-    let (trigger_tx, mut trigger_rx) = tokio::sync::mpsc::unbounded_channel::<(String, u16)>();
-    ebpf::load::load_ebpf(&ETH_NAME, config_rx, trigger_tx);
 
-    // declare services + push trigger config to the eBPF observer on each refresh
+    // Poked by the cache's docker-events watcher after every container
+    // start/die so `declare_services` re-runs immediately instead of
+    // waiting up to its 10 s polling interval. Without this, a freshly
+    // started task can fire its first SYN to a trigger port before that
+    // port has been added back to the ipset, so NFQUEUE misses the SYN,
+    // the kernel routes it to the public-IP DNS resolution, and the app
+    // gets ECHO/EHOSTUNREACH before we ever get a chance to DNAT.
+    let docker_changed = Arc::new(Notify::new());
+
+    nfqueue::spawn_listener(
+        grpc_server3,
+        triggers_state,
+        config_rx,
+        docker_changed.clone(),
+    );
+
+    // declare services + push the port→service map to the NFQUEUE listener
+    // on each refresh. Clone the grpc handle: the original is still needed
+    // below for `set_firewall_rules`' event reporting.
     let grpc_server_ds = grpc_server.clone();
     tokio::spawn(async move {
-        declare_services(grpc_server_ds, config_tx)
+        declare_services(grpc_server_ds, config_tx, docker_changed)
             .await
             .expect("Failed to declare services");
-    });
-
-    // forward observed triggers to the gRPC server
-    tokio::spawn(async move {
-        while let Some((service_name, port)) = trigger_rx.recv().await {
-            if !triggers_state_tr.try_mark_pending(port) {
-                continue;
-            }
-            if let Err(e) = grpc_server3
-                .backend_trigger(service_name.clone(), u32::from(port))
-                .await
-            {
-                eprintln!("backend_trigger for '{service_name}' port {port} failed: {e}");
-                triggers_state_tr.forget(port);
-                let grpc = grpc_server3.clone();
-                let svc = service_name.clone();
-                let err_msg = e.clone();
-                tokio::spawn(async move {
-                    let _ = grpc
-                        .report_event(AgentEvent {
-                            event: Some(AgentEventKind::BackendTriggerSendFailed(
-                                AgentBackendTriggerSendFailed {
-                                    service_name: svc,
-                                    port: u32::from(port),
-                                    error_message: err_msg,
-                                },
-                            )),
-                        })
-                        .await;
-                });
-            }
-        }
     });
 
     // watch the file defining rules and update the firewall accordingly
@@ -289,6 +276,7 @@ async fn grpc_init() -> Result<NullnetGrpcInterface, Error> {
 async fn declare_services(
     grpc_server: NullnetGrpcInterface,
     config_tx: UnboundedSender<HashMap<u16, String>>,
+    docker_changed: Arc<Notify>,
 ) -> Result<(), Error> {
     let mut last_declared: Vec<nullnet_grpc_lib::nullnet_grpc::Service> = Vec::new();
     loop {
@@ -393,8 +381,13 @@ async fn declare_services(
             }
         }
 
-        // wait before re-declaring services
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        // Wait up to 10 s before re-declaring, but cut the wait short on a
+        // docker container start/die — that's what populates the ipset for
+        // a freshly-started task before its app dials a trigger port.
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+            _ = docker_changed.notified() => {}
+        }
     }
 }
 

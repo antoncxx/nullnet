@@ -47,7 +47,7 @@ The repository should be cloned under `/root` so the provided `setup-*.sh` scrip
   [[services]]
   name = "color.com"
   timeout = 0
-  proxy_dependencies = ["fs.color.com"]
+  proxy_dependencies = [["fs.color.com"]]
 
   [[services.triggers]]
   port = 5555
@@ -58,8 +58,9 @@ The repository should be cloned under `/root` so the provided `setup-*.sh` scrip
   ...
   ```
 
-- `proxy_dependencies` is a linear dep chain walked when the service is reached via a `Proxy`
-  RPC from nullnet-proxy
+- `proxy_dependencies` is a list of independent dep chains walked when the service is reached via a
+  `Proxy` RPC from nullnet-proxy; each inner array is one linear branch and all branches are brought
+  up in parallel
 - each `[[services.triggers]]` block pairs a port observed on the initiator's host with a linear
   chain walked when the service is reached via a `BackendTrigger` RPC from nullnet-client (one
   chain per port)

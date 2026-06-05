@@ -10,6 +10,11 @@ use tokio::time::Instant;
 
 const CERTS_DIR: &str = "./certs";
 
+// TODO(cert-ingest): certs currently arrive as files dropped in ./certs. Plan:
+// a UI/API that encrypts keys on ingest (see encryption-at-rest TODO) and writes
+// ciphertext here. That API must be HTTPS, require admin auth, and never return
+// private keys on read.
+
 /// Read every certificate from disk into a `CertBundle`.
 ///
 /// Layout: `./certs/<domain>/fullchain.pem` + `./certs/<domain>/privkey.pem`,
@@ -35,10 +40,10 @@ pub(crate) async fn load_certificates() -> CertBundle {
         else {
             continue;
         };
-        // TODO(encryption-at-rest): privkey.pem is read in plaintext here. Once
-        // encryption-at-rest lands, decrypt the key before adding it to the
-        // bundle, and ensure the gRPC channel is TLS-protected (see gRPC TLS
-        // TODO in main.rs) since the bundle carries private keys.
+        // TODO(encryption-at-rest): keys are read in plaintext. Plan (routix
+        // style): AES-256-GCM with a master key from CERT_ENCRYPTION_KEY,
+        // encrypt on ingest, store ciphertext on disk, decrypt here before
+        // bundling. Pairs with the gRPC-TLS TODO since the bundle carries keys.
         let (Ok(fullchain_pem), Ok(key_pem)) = (
             tokio::fs::read_to_string(path.join("fullchain.pem")).await,
             tokio::fs::read_to_string(path.join("privkey.pem")).await,

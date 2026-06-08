@@ -7,6 +7,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+mod certificates;
 mod config;
 mod events;
 mod events_stream;
@@ -37,6 +38,14 @@ pub async fn serve(state: AppState) {
         .route("/api/graph/{stack}", get(graph::graph_handler))
         .route("/api/sessions", get(sessions::list_handler))
         .route("/api/sessions/{id}", delete(sessions::teardown_handler))
+        .route(
+            "/api/certificates",
+            get(certificates::list_handler).post(certificates::upload_handler),
+        )
+        .route(
+            "/api/certificates/{domain}",
+            delete(certificates::delete_handler),
+        )
         .route("/api/events", get(events::events_handler))
         .route(
             "/api/events/stream",

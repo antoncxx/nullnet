@@ -137,6 +137,8 @@ function eventDetail(e: EventJson): string {
       return `${e.raw_ip} · ${e.service_name}`;
     case 'proxy_client_not_inet':
       return e.address_family;
+    case 'tls_certificate_invalid':
+      return `${e.domain} · ${e.reason}`;
     // Proxy info
     case 'proxy_request_routed':
       return `${e.service_name} · ${e.client_ip} → ${e.upstream_ip} · ${e.latency_ms}ms`;

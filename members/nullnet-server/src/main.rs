@@ -1,4 +1,5 @@
 mod certs;
+mod crypto;
 mod env;
 mod events;
 mod graphviz;
@@ -33,6 +34,9 @@ async fn main() -> Result<(), Error> {
     // }
 
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), PORT);
+
+    // cert private keys are encrypted at rest with this key; fail fast if absent
+    crypto::init_from_env()?;
 
     // TODO(grpc-tls): the gRPC server is plaintext, but WatchCertificates
     // streams private keys. Enable TLS here (Server::builder().tls_config(..)),

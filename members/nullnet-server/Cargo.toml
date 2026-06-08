@@ -27,6 +27,9 @@ chrono.workspace = true
 axum = "0.8"
 rust-embed = { version = "8", features = ["axum"] }
 mime_guess = "2"
+aes-gcm = "0.10"
+base64 = "0.22"
+x509-parser = "0.16"
 
 [build-dependencies]
 

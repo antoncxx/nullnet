@@ -1,3 +1,4 @@
+mod cert;
 mod certs;
 mod crypto;
 mod env;

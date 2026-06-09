@@ -2,7 +2,7 @@ use crate::events::EventStore;
 use crate::orchestrator::Orchestrator;
 use crate::services::input::StackMap;
 use axum::Router;
-use axum::routing::{delete, get};
+use axum::routing::{delete, get, post};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -41,6 +41,10 @@ pub async fn serve(state: AppState) {
         .route(
             "/api/certificates",
             get(certificates::list_handler).post(certificates::upload_handler),
+        )
+        .route(
+            "/api/certificates/request",
+            post(certificates::request_handler),
         )
         .route(
             "/api/certificates/{domain}",

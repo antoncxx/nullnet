@@ -1,4 +1,5 @@
 use super::AppState;
+use crate::cert::{self, CertificateAuthority, DnsProviderCredentials};
 use crate::certs::{CERTS_DIR, KEY_ENCRYPTED, KEY_PLAINTEXT};
 use crate::crypto;
 use crate::events::Event;
@@ -78,7 +79,19 @@ pub(super) async fn upload_handler(
     if !req.key_pem.contains("PRIVATE KEY") {
         return bad_request("key_pem is not a PEM private key");
     }
-    let Ok(encoded) = crypto::cipher().encrypt(&req.key_pem) else {
+    persist_cert(&state, &domain, &req.fullchain_pem, &req.key_pem).await
+}
+
+/// Encrypt the key, write `fullchain.pem` + `privkey.enc` into `./certs/<domain>/`,
+/// drop any stale plaintext key, and emit an install/renew event. Shared by the
+/// manual-upload and ACME-request handlers. The certs watcher propagates the write.
+async fn persist_cert(
+    state: &AppState,
+    domain: &str,
+    fullchain_pem: &str,
+    key_pem: &str,
+) -> axum::response::Response {
+    let Ok(encoded) = crypto::cipher().encrypt(key_pem) else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             axum::Json(ErrorJson {
@@ -88,10 +101,10 @@ pub(super) async fn upload_handler(
             .into_response();
     };
 
-    let dir = PathBuf::from(CERTS_DIR).join(&domain);
+    let dir = PathBuf::from(CERTS_DIR).join(domain);
     let renewal = tokio::fs::try_exists(&dir).await.unwrap_or(false);
     if tokio::fs::create_dir_all(&dir).await.is_err()
-        || tokio::fs::write(dir.join("fullchain.pem"), &req.fullchain_pem)
+        || tokio::fs::write(dir.join("fullchain.pem"), fullchain_pem)
             .await
             .is_err()
         || tokio::fs::write(dir.join(KEY_ENCRYPTED), &encoded)
@@ -109,12 +122,68 @@ pub(super) async fn upload_handler(
     // drop any stale plaintext key from a previous file-drop
     let _ = tokio::fs::remove_file(dir.join(KEY_PLAINTEXT)).await;
     let event = if renewal {
-        Event::certificate_renewed(domain)
+        Event::certificate_renewed(domain.to_string())
     } else {
-        Event::certificate_installed(domain)
+        Event::certificate_installed(domain.to_string())
     };
     state.events.emit(event).await;
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// Default seconds to wait for a TXT record to propagate before asking the CA to
+/// validate the DNS-01 challenge.
+const DEFAULT_DNS_PROPAGATION_SECS: u64 = 30;
+
+#[derive(Deserialize)]
+pub(super) struct RequestReq {
+    domain: String,
+    credentials: DnsProviderCredentials,
+    dns_propagation_secs: Option<u64>,
+}
+
+/// Issue a cert from Let's Encrypt via a DNS-01 challenge. The DNS-provider
+/// credentials are used for this request only and never persisted. On success
+/// the cert is stored exactly like a manual upload (encrypted key at rest) and
+/// the watcher pushes it to the proxies.
+pub(super) async fn request_handler(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<RequestReq>,
+) -> impl IntoResponse {
+    let Some(domain) = sanitize_domain(&req.domain) else {
+        return bad_request("invalid domain");
+    };
+    let provider_name = req.credentials.provider_name();
+    println!("ACME request for '{domain}' via DNS provider '{provider_name}'");
+    let provider = match cert::create_dns_provider(req.credentials) {
+        Ok(p) => p,
+        Err(e) => return bad_request(&format!("invalid DNS provider credentials: {e}")),
+    };
+
+    // staging CA in debug builds, production in release (matches ../routix)
+    let ca = if cfg!(debug_assertions) {
+        CertificateAuthority::staging()
+    } else {
+        CertificateAuthority::production()
+    };
+    let propagation = req
+        .dns_propagation_secs
+        .unwrap_or(DEFAULT_DNS_PROPAGATION_SECS);
+
+    match ca
+        .request_certificate(&domain, provider.as_ref(), propagation)
+        .await
+    {
+        Ok((fullchain_pem, key_pem)) => {
+            persist_cert(&state, &domain, &fullchain_pem, &key_pem).await
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            axum::Json(ErrorJson {
+                error: format!("ACME issuance failed: {e:#}"),
+            }),
+        )
+            .into_response(),
+    }
 }
 
 /// Remove a cert. The change is pushed to the proxies and hot-reloaded like any

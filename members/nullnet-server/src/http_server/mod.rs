@@ -58,9 +58,20 @@ pub async fn serve(state: AppState) {
         .fallback(get(static_files::static_handler))
         .with_state(state);
 
+    // Self-signed cert, regenerated each start. The admin UI is single-origin, so
+    // relative /api calls inherit HTTPS; browsers prompt to trust the cert once.
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+        .expect("failed to generate self-signed certificate");
+    let config = axum_server::tls_rustls::RustlsConfig::from_pem(
+        cert.cert.pem().into_bytes(),
+        cert.signing_key.serialize_pem().into_bytes(),
+    )
+    .await
+    .expect("failed to build TLS config");
+
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), HTTP_PORT);
-    let listener = tokio::net::TcpListener::bind(addr)
+    axum_server::bind_rustls(addr, config)
+        .serve(app.into_make_service())
         .await
-        .expect("failed to bind HTTP listener");
-    axum::serve(listener, app).await.expect("HTTP server error");
+        .expect("HTTPS server error");
 }

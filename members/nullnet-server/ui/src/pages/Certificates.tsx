@@ -144,7 +144,7 @@ export default function Certificates() {
   }
 
   async function remove(d: string) {
-    if (!confirm(`Delete certificate for ${d}? Clearing the last cert needs a proxy restart to fully take effect.`)) return;
+    if (!confirm(`Delete certificate for ${d}?`)) return;
     setDeleting(prev => new Set(prev).add(d));
     try {
       await fetch(`/api/certificates/${encodeURIComponent(d)}`, { method: 'DELETE' });

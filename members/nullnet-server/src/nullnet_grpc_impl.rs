@@ -103,7 +103,11 @@ impl NullnetGrpcImpl {
         Ok(Response::new(ReceiverStream::new(receiver)))
     }
 
-    // TODO: avoid race conditions when multiple proxy requests are made concurrently
+    // Concurrent first-time setup is race-safe for single-hop deps (check-and-
+    // reserve is atomic under the write lock with an all-replicas reuse check).
+    // TODO: multi-hop chains can still leave a bounded phantom at hop 2+ under
+    // concurrency, since deeper-edge source identity is fixed during phase-1
+    // selection. Closing it needs whole-chain reservation under one lock.
     async fn proxy_impl(
         &self,
         request: Request<ProxyRequest>,
@@ -697,14 +701,14 @@ impl NullnetGrpcImpl {
                 let Some(ServiceInfo::Registered(reg)) = stack_map.get_mut(server.name()) else {
                     return EdgeOutcome::Failed;
                 };
-                // Proxy edges: reuse if this client is already connected anywhere (stickiness).
-                // Dep edges: reuse only if this exact (client, server_replica) pair exists,
-                // so each proxy chain can independently pick a different replica.
-                let already_setup = if client.is_proxy().is_some() {
-                    reg.is_client_setup(&client).is_some()
-                } else {
-                    reg.is_client_on_replica(&client, server_ethernet, server_docker.as_deref())
-                };
+                // Reuse if this client is already connected to ANY replica of the
+                // dependency. Proxy clients are keyed by (client, proxy); dep
+                // clients by source replica — and a source replica can only route
+                // to one replica of a given dep, so an existing entry (even an
+                // in-progress placeholder from a concurrent request) means reuse,
+                // not a new network. Checking across all replicas under this write
+                // lock is what makes concurrent first-time setup race-free.
+                let already_setup = reg.is_client_setup(&client).is_some();
                 if already_setup {
                     reg.add_chain(&client);
                     return EdgeOutcome::Success {

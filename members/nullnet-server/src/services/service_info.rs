@@ -431,19 +431,6 @@ impl RegisteredServiceInfo {
         None
     }
 
-    /// Check if a specific replica already has this client.
-    pub(crate) fn is_client_on_replica(
-        &self,
-        client: &Client,
-        ip: IpAddr,
-        docker: Option<&str>,
-    ) -> bool {
-        self.replicas
-            .iter()
-            .filter(|r| r.matches_identity(ip, docker))
-            .any(|r| r.clients.is_client_setup(client).is_some())
-    }
-
     pub(crate) fn remove_client(&mut self, client: &Client) {
         for replica in &mut self.replicas {
             if replica.clients.clients_mut().remove(client).is_some() {

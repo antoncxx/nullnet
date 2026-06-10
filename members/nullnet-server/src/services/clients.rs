@@ -9,7 +9,13 @@ pub(super) struct Clients {
 }
 
 impl Clients {
-    pub(super) fn add_client(&mut self, client: Client, client_info: ClientInfo) {
+    pub(super) fn add_client(&mut self, client: Client, mut client_info: ClientInfo) {
+        // Preserve chains accumulated on an existing entry (e.g. a placeholder a
+        // concurrent request already incremented) so promoting it to a live
+        // entry doesn't reset the count and cause a premature teardown.
+        if let Some(existing) = self.clients.get(&client) {
+            client_info.set_active_chains(existing.active_chains());
+        }
         self.clients.insert(client, client_info);
     }
 
@@ -167,6 +173,10 @@ impl ClientInfo {
 
     pub(super) fn remove_active_chains(&mut self, num_chains: usize) {
         self.active_chains = self.active_chains.saturating_sub(num_chains);
+    }
+
+    pub(super) fn set_active_chains(&mut self, num_chains: usize) {
+        self.active_chains = num_chains;
     }
 
     pub(crate) fn active_chains(&self) -> usize {

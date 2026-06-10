@@ -570,10 +570,22 @@ fn build_linear_chain(
     for dep in deps {
         let (dep_ip, dep_docker) = match services.get(dep) {
             Some(ServiceInfo::Registered(reg)) => {
-                if let Some(r) = reg.pick_replica_least_clients() {
-                    (Some(r.ip()), r.docker_container().map(String::from))
-                } else {
-                    (None, None)
+                // Sticky by source replica: a source replica can only route to a
+                // single replica of a given dependency (its /etc/hosts entry for
+                // the service name holds one overlay IP), so reuse the target it's
+                // already bound to. Only the first chain from this source picks a
+                // fresh least-loaded replica.
+                let sticky = current_ip.and_then(|ip| {
+                    let client =
+                        Client::new_service(current_name.clone(), ip, current_docker.clone());
+                    reg.client_replica(&client)
+                });
+                match sticky {
+                    Some((ip, docker)) => (Some(ip), docker),
+                    None => match reg.pick_replica_least_clients() {
+                        Some(r) => (Some(r.ip()), r.docker_container().map(String::from)),
+                        None => (None, None),
+                    },
                 }
             }
             _ => (None, None),

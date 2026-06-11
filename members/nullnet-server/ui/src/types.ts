@@ -107,3 +107,24 @@ export type EventJson =
   | WithSeverity & { type: 'certificate_installed'; domain: string }
   | WithSeverity & { type: 'certificate_renewed'; domain: string }
   | WithSeverity & { type: 'certificate_removed'; domain: string };
+
+export interface GraphNodeJson {
+  id: string;
+  registered: boolean;
+  entry_point: boolean;
+  replica_count: number;
+  active_replica_count: number;
+}
+
+export interface GraphEdgeJson {
+  from: string;
+  via_proxy?: string;
+  to: string;
+  net_id: number;
+  setup_ms: number;
+}
+
+export interface GraphJson {
+  nodes: GraphNodeJson[];
+  edges: GraphEdgeJson[];
+}

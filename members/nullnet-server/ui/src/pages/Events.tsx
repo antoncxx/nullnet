@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import Layout from '../components/Layout';
 import type { EventJson, Severity } from '../types';
 
@@ -158,9 +159,27 @@ const MAX_EVENTS = 500;
 const SEVERITIES: Severity[] = ['info', 'warning', 'error'];
 
 export default function Events() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const kindFilter = searchParams.get('kind') ?? '';
+  const severityFilter = (searchParams.get('severity') ?? '') as Severity | '';
+
+  function setKindFilter(kind: string) {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev);
+      if (kind) next.set('kind', kind); else next.delete('kind');
+      return next;
+    }, { replace: true });
+  }
+
+  function setSeverityFilter(s: Severity | '') {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev);
+      if (s) next.set('severity', s); else next.delete('severity');
+      return next;
+    }, { replace: true });
+  }
+
   const [events, setEvents] = useState<EventJson[]>([]);
-  const [kindFilter, setKindFilter] = useState<string>('');
-  const [severityFilter, setSeverityFilter] = useState<Severity | ''>('');
   const [paused, setPaused] = useState(false);
   const [liveCount, setLiveCount] = useState(0);
   const pausedRef = useRef(paused);
@@ -234,7 +253,7 @@ export default function Events() {
                 <button
                   key={s}
                   style={chipStyle(severityFilter === s, SEVERITY_COLOR[s])}
-                  onClick={() => setSeverityFilter(prev => prev === s ? '' : s)}
+                  onClick={() => setSeverityFilter(severityFilter === s ? '' : s)}
                 >
                   {s.charAt(0).toUpperCase() + s.slice(1)}
                 </button>

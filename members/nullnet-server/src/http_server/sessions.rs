@@ -34,11 +34,11 @@ pub(super) async fn list_handler(State(state): State<AppState>) -> impl IntoResp
                 reg.all_clients_owned()
                     .into_iter()
                     .filter_map(|(c, ci, _, _)| {
-                        let proxy_ip = c.is_proxy()?;
+                        c.is_proxy()?;
                         Some(SessionJson {
                             id: ci.net_id(),
                             network_id: ci.net_id(),
-                            client_ip: proxy_ip.to_string(),
+                            client_ip: c.name().to_string(),
                             client_net: ci.client_net().to_string(),
                             server_net: ci.server_net().to_string(),
                             service: name.clone(),

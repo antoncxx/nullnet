@@ -8,6 +8,7 @@ import Pool from './pages/Pool';
 import Config from './pages/Config';
 import Events from './pages/Events';
 import Certificates from './pages/Certificates';
+import Topology from './pages/Topology';
 
 export default function App() {
   return (
@@ -22,6 +23,7 @@ export default function App() {
           <Route path="/config" element={<Config />} />
           <Route path="/certificates" element={<Certificates />} />
           <Route path="/events" element={<Events />} />
+          <Route path="/topology" element={<Topology />} />
         </Routes>
       </BrowserRouter>
     </StackProvider>

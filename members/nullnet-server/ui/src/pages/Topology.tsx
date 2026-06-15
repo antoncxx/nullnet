@@ -1,38 +1,13 @@
-import { useState, useEffect, useRef } from 'react';
 import Layout from '../components/Layout';
-import { useApi } from '../hooks/useApi';
 import { useStack } from '../StackContext';
-import type { GraphJson, ServiceJson, SessionJson } from '../types';
-import type { PanelState } from '../components/topology/types';
-import { INTERNET_ID } from '../components/topology/types';
+import { TopologyProvider, useTopologyData, useTopologyUI } from '../components/topology/TopologyContext';
 import TopologyGraph from '../components/topology/TopologyGraph';
 import TopologyPanel from '../components/topology/TopologyPanel';
 
-export default function Topology() {
+function TopologyView() {
+  const { graph } = useTopologyData();
+  const { showRegistered, showUnregistered, panel, dispatch } = useTopologyUI();
   const { stack } = useStack();
-  const { data: graph, refetch } = useApi<GraphJson>(`/api/graph/${stack}`);
-  const { data: services } = useApi<ServiceJson[]>(`/api/services/${stack}`, 5000);
-  const { data: sessions } = useApi<SessionJson[]>('/api/sessions', 5000);
-
-  const [panel, setPanel] = useState<PanelState>(null);
-  const [showRegistered, setShowRegistered] = useState(true);
-  const [showUnregistered, setShowUnregistered] = useState(true);
-  const [focusedClientIp, setFocusedClientIp] = useState<string | null>(null);
-
-  useEffect(() => { setPanel(null); setFocusedClientIp(null); }, [stack]);
-
-  const refetchRef = useRef(refetch);
-  refetchRef.current = refetch;
-  useEffect(() => {
-    const es = new EventSource('/api/events/stream');
-    es.onmessage = (ev) => {
-      try {
-        const event = JSON.parse(ev.data);
-        if (event.type === 'session_created' || event.type === 'session_torn_down') refetchRef.current();
-      } catch { /* ignore */ }
-    };
-    return () => es.close();
-  }, []);
 
   const nodeCount = graph?.nodes.length ?? 0;
   const registeredCount = graph?.nodes.filter(n => n.registered).length ?? 0;
@@ -41,50 +16,8 @@ export default function Topology() {
     ? new Set(graph.edges.filter(e => e.via_proxy).map(e => e.via_proxy!)).size
     : 0;
 
-  const nodeIps = new Map<string, string>();
-  for (const svc of services ?? []) {
-    if (svc.replicas.length > 0) nodeIps.set(svc.name, svc.replicas[0].ip);
-  }
-
-  const focusedSessions = focusedClientIp && sessions
-    ? sessions.filter(s => s.client_ip === focusedClientIp)
-    : null;
-
-  const focusedNetIds: Set<number> | null = focusedClientIp && sessions
-    ? new Set(sessions.filter(s => s.client_ip === focusedClientIp).map(s => s.network_id))
-    : null;
-
-  const selectedNodeId =
-    panel?.type === 'node' ? panel.nodeId :
-    panel?.type === 'internet' ? INTERNET_ID :
-    null;
-  const selectedEdgeKey =
-    panel?.type === 'edge' ? `${panel.fromId}\0${panel.toId}` : null;
-
-  function handleNodeClick(nodeId: string) {
-    if (nodeId === INTERNET_ID) {
-      setPanel(p => p?.type === 'internet' ? null : { type: 'internet' });
-      return;
-    }
-    setPanel(p => p?.type === 'node' && p.nodeId === nodeId ? null : { type: 'node', nodeId });
-  }
-  function handleEdgeClick(fromId: string, toId: string, edgeIndices: number[]) {
-    setPanel(p =>
-      p?.type === 'edge' && p.fromId === fromId && p.toId === toId
-        ? null
-        : { type: 'edge', fromId, toId, edgeIndices },
-    );
-  }
-
   return (
-    <Layout
-      page="topology"
-      topbarRight={
-        <span style={{ fontSize: 11, color: 'var(--t1)', display: 'flex', alignItems: 'center', gap: 5 }}>
-          <span className="live-dot" />live · SSE
-        </span>
-      }
-    >
+    <>
       <div className="content">
         <div className="stats">
           <div className="stat glass">
@@ -97,7 +30,6 @@ export default function Topology() {
             <div className="stat-value" style={{ color: 'var(--cyan)' }}>{edgeCount}</div>
             <div className="stat-sub">live connections</div>
           </div>
-
           <div className="stat glass">
             <div className="stat-label">Entry Points</div>
             <div className="stat-value" style={{ color: 'var(--green)' }}>
@@ -109,10 +41,16 @@ export default function Topology() {
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 2px', flexWrap: 'wrap' as const }}>
           <span style={{ fontSize: 10, color: 'var(--t2)', letterSpacing: '.08em' }}>FILTER</span>
-          <button className={`filter-chip${showRegistered ? ' on' : ''}`} onClick={() => setShowRegistered(p => !p)}>
+          <button
+            className={`filter-chip${showRegistered ? ' on' : ''}`}
+            onClick={() => dispatch({ type: 'REGISTERED_TOGGLED' })}
+          >
             Registered
           </button>
-          <button className={`filter-chip${showUnregistered ? ' on' : ''}`} onClick={() => setShowUnregistered(p => !p)}>
+          <button
+            className={`filter-chip${showUnregistered ? ' on' : ''}`}
+            onClick={() => dispatch({ type: 'UNREGISTERED_TOGGLED' })}
+          >
             Unregistered
           </button>
           <span style={{ width: 1, height: 18, background: 'var(--t3)', margin: '0 2px', display: 'inline-block' }} />
@@ -143,20 +81,7 @@ export default function Topology() {
                 No services registered for stack <b>{stack}</b>
               </div>
             )}
-            {graph && graph.nodes.length > 0 && (
-              <TopologyGraph
-                graph={graph}
-                showRegistered={showRegistered}
-                showUnregistered={showUnregistered}
-                selectedNodeId={selectedNodeId}
-                selectedEdgeKey={selectedEdgeKey}
-                focusedNetIds={focusedNetIds}
-                focusedSessions={focusedSessions}
-                nodeIps={nodeIps}
-                onNodeClick={handleNodeClick}
-                onEdgeClick={handleEdgeClick}
-              />
-            )}
+            {graph && graph.nodes.length > 0 && <TopologyGraph />}
           </div>
           {proxyCount > 0 && (
             <div style={{ padding: '8px 14px 10px', display: 'flex', gap: 16, fontSize: 10, color: 'var(--t2)', borderTop: '1px solid var(--gb)' }}>
@@ -191,8 +116,13 @@ export default function Topology() {
                 {graph.edges.map((e, i) => (
                   <tr
                     key={i}
-                    onClick={() => handleEdgeClick(e.from, e.to, [i])}
-                    style={{ cursor: 'pointer', background: panel?.type === 'edge' && panel.edgeIndices.includes(i) ? 'rgba(91,156,246,.07)' : undefined }}
+                    onClick={() => dispatch({ type: 'EDGE_CLICKED', fromId: e.from, toId: e.to, edgeIndices: [i] })}
+                    style={{
+                      cursor: 'pointer',
+                      background: panel?.type === 'edge' && panel.edgeIndices.includes(i)
+                        ? 'rgba(91,156,246,.07)'
+                        : undefined,
+                    }}
                   >
                     <td style={{ fontFamily: "'JetBrains Mono',monospace", fontWeight: 500 }}>{e.from}</td>
                     <td style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 11, color: '#fbbf24' }}>
@@ -211,18 +141,25 @@ export default function Topology() {
         )}
       </div>
 
-      {graph && (
-        <TopologyPanel
-          panel={panel}
-          graph={graph}
-          services={services ?? null}
-          sessions={sessions ?? null}
-          focusedClientIp={focusedClientIp}
-          onClose={() => setPanel(null)}
-          onNodeClick={handleNodeClick}
-          onClientFocus={ip => setFocusedClientIp(prev => prev === ip ? null : ip)}
-        />
-      )}
+      <TopologyPanel />
+    </>
+  );
+}
+
+export default function Topology() {
+  const { stack } = useStack();
+  return (
+    <Layout
+      page="topology"
+      topbarRight={
+        <span style={{ fontSize: 11, color: 'var(--t1)', display: 'flex', alignItems: 'center', gap: 5 }}>
+          <span className="live-dot" />live · SSE
+        </span>
+      }
+    >
+      <TopologyProvider stack={stack}>
+        <TopologyView />
+      </TopologyProvider>
     </Layout>
   );
 }

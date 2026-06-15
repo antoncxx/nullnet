@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { SessionJson } from '../../types';
 import { spRow, spKey, SpSep } from './panelStyles';
+import { useTopologyData, useTopologyUI } from './TopologyContext';
 
 const PREVIEW_LIMIT = 5;
 
@@ -23,16 +24,14 @@ function formatTime(unix: number): string {
   return new Date(unix * 1000).toLocaleTimeString([], { hour12: false });
 }
 
-interface Props {
-  sessions: SessionJson[];
-  focusedClientIp: string | null;
-  onClientFocus: (ip: string) => void;
-}
-
-export default function InternetPanel({ sessions, focusedClientIp, onClientFocus }: Props) {
+export default function InternetPanel() {
+  const { sessions } = useTopologyData();
+  const { focusedClientIp, dispatch } = useTopologyUI();
   const [expanded, setExpanded] = useState(new Set<string>());
 
-  if (sessions.length === 0) {
+  const sessionList = sessions ?? [];
+
+  if (sessionList.length === 0) {
     return (
       <div style={{ color: 'var(--t2)', fontSize: 11, textAlign: 'center', paddingTop: 24 }}>
         No active clients
@@ -40,7 +39,7 @@ export default function InternetPanel({ sessions, focusedClientIp, onClientFocus
     );
   }
 
-  const groups = groupBySubnet(sessions);
+  const groups = groupBySubnet(sessionList);
 
   return (
     <>
@@ -48,8 +47,8 @@ export default function InternetPanel({ sessions, focusedClientIp, onClientFocus
         <div style={spKey}>Summary</div>
         <div style={{ fontSize: 12, color: 'var(--t0)', display: 'flex', gap: 8, alignItems: 'baseline' }}>
           <span>
-            <span style={{ color: 'var(--cyan)', fontFamily: "'JetBrains Mono',monospace" }}>{sessions.length}</span>
-            {' '}client{sessions.length !== 1 ? 's' : ''}
+            <span style={{ color: 'var(--cyan)', fontFamily: "'JetBrains Mono',monospace" }}>{sessionList.length}</span>
+            {' '}client{sessionList.length !== 1 ? 's' : ''}
           </span>
           <span style={{ color: 'var(--t3)' }}>·</span>
           <span>
@@ -90,7 +89,7 @@ export default function InternetPanel({ sessions, focusedClientIp, onClientFocus
               return (
                 <div
                   key={s.id}
-                  onClick={() => onClientFocus(s.client_ip)}
+                  onClick={() => dispatch({ type: 'CLIENT_FOCUSED', ip: s.client_ip })}
                   style={{
                     display: 'flex', alignItems: 'center', gap: 8,
                     padding: '5px 6px',

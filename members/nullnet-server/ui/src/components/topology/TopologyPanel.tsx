@@ -1,22 +1,15 @@
-import type { GraphJson, ServiceJson, SessionJson } from '../../types';
-import type { PanelState } from './types';
+import { useTopologyData, useTopologyUI } from './TopologyContext';
 import ServiceNodePanel from './ServiceNodePanel';
 import ProxyNodePanel from './ProxyNodePanel';
 import EdgePanel from './EdgePanel';
 import InternetPanel from './InternetPanel';
 
-interface Props {
-  panel: PanelState;
-  graph: GraphJson;
-  services: ServiceJson[] | null;
-  sessions: SessionJson[] | null;
-  focusedClientIp: string | null;
-  onClose: () => void;
-  onNodeClick: (id: string) => void;
-  onClientFocus: (ip: string) => void;
-}
+export default function TopologyPanel() {
+  const { graph, services } = useTopologyData();
+  const { panel, dispatch } = useTopologyUI();
 
-export default function TopologyPanel({ panel, graph, services, sessions, focusedClientIp, onClose, onNodeClick, onClientFocus }: Props) {
+  if (!graph) return null;
+
   function getTitle(): string {
     if (!panel) return '–';
     if (panel.type === 'internet') return 'Internet Clients';
@@ -25,16 +18,10 @@ export default function TopologyPanel({ panel, graph, services, sessions, focuse
   }
 
   function renderContent() {
-    if (!panel) return null;
+    if (!panel || !graph) return null;
 
     if (panel.type === 'internet') {
-      return (
-        <InternetPanel
-          sessions={sessions ?? []}
-          focusedClientIp={focusedClientIp}
-          onClientFocus={onClientFocus}
-        />
-      );
+      return <InternetPanel />;
     }
 
     if (panel.type === 'edge') {
@@ -49,7 +36,7 @@ export default function TopologyPanel({ panel, graph, services, sessions, focuse
         <ServiceNodePanel
           node={{ ...graphNode, kind: 'service' }}
           service={services?.find(s => s.name === nodeId)}
-          onDepClick={onNodeClick}
+          onDepClick={id => dispatch({ type: 'NODE_CLICKED', nodeId: id })}
         />
       );
     }
@@ -78,7 +65,10 @@ export default function TopologyPanel({ panel, graph, services, sessions, focuse
         }}>
           {getTitle()}
         </span>
-        <button onClick={onClose} style={{ background: 'none', border: 'none', color: 'var(--t2)', cursor: 'pointer', fontSize: 16, lineHeight: 1, padding: 0, flexShrink: 0 }}>
+        <button
+          onClick={() => dispatch({ type: 'PANEL_CLOSED' })}
+          style={{ background: 'none', border: 'none', color: 'var(--t2)', cursor: 'pointer', fontSize: 16, lineHeight: 1, padding: 0, flexShrink: 0 }}
+        >
           ✕
         </button>
       </div>

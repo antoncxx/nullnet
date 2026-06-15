@@ -164,27 +164,27 @@ export default function TopologyGraphSvg({
               <g pointerEvents="none">
                 {srcIp && (
                   <g>
-                    <rect x={lp.src.x - 42} y={lp.src.y - 10} width={84} height={14} rx="3"
+                    <rect x={lp.src.x - 52} y={lp.src.y - 10} width={104} height={14} rx="3"
                       fill="rgba(3,5,8,.82)" stroke="rgba(255,255,255,.08)" />
                     <text x={lp.src.x} y={lp.src.y} textAnchor={lp.src.anchor}
                       fill="rgba(255,255,255,.75)" fontSize="8" fontFamily="'JetBrains Mono',monospace">
-                      {srcIp}
+                      <tspan fill="rgba(255,255,255,.35)">src  </tspan>{srcIp}
                     </text>
                   </g>
                 )}
                 {dstIp && (
                   <g>
-                    <rect x={lp.dst.x - 42} y={lp.dst.y - 10} width={84} height={14} rx="3"
+                    <rect x={lp.dst.x - 52} y={lp.dst.y - 10} width={104} height={14} rx="3"
                       fill="rgba(3,5,8,.82)" stroke="rgba(255,255,255,.08)" />
                     <text x={lp.dst.x} y={lp.dst.y} textAnchor={lp.dst.anchor}
                       fill="rgba(255,255,255,.75)" fontSize="8" fontFamily="'JetBrains Mono',monospace">
-                      {dstIp}
+                      <tspan fill="rgba(255,255,255,.35)">dst  </tspan>{dstIp}
                     </text>
                   </g>
                 )}
                 {session && (
                   <g>
-                    <rect x={lp.mid.x - 58} y={lp.mid.y - 24} width={116} height={48} rx="5"
+                    <rect x={lp.mid.x - 67} y={lp.mid.y - 24} width={134} height={48} rx="5"
                       fill="rgba(3,5,8,.88)" stroke="rgba(255,255,255,.07)" />
                     <text x={lp.mid.x} y={lp.mid.y - 11} textAnchor="middle"
                       fill="rgba(91,156,246,.9)" fontSize="8.5" fontWeight="600">
@@ -192,11 +192,11 @@ export default function TopologyGraphSvg({
                     </text>
                     <text x={lp.mid.x} y={lp.mid.y + 2} textAnchor="middle"
                       fill="rgba(255,255,255,.5)" fontSize="7.5" fontFamily="'JetBrains Mono',monospace">
-                      {session.client_net}
+                      <tspan fill="rgba(255,255,255,.3)">src  </tspan>{session.client_net}
                     </text>
                     <text x={lp.mid.x} y={lp.mid.y + 15} textAnchor="middle"
                       fill="rgba(255,255,255,.5)" fontSize="7.5" fontFamily="'JetBrains Mono',monospace">
-                      {session.server_net}
+                      <tspan fill="rgba(255,255,255,.3)">dst  </tspan>{session.server_net}
                     </text>
                   </g>
                 )}

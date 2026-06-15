@@ -9,6 +9,7 @@ interface Props {
   selectedNodeId: string | null;
   selectedEdgeKey: string | null;
   focusedNetIds: Set<number> | null;
+  nodeIps: Map<string, string>;
   onNodeClick: (id: string) => void;
   onEdgeClick: (fromId: string, toId: string, edgeIndices: number[]) => void;
 }
@@ -20,6 +21,7 @@ export default function TopologyGraph({
   selectedNodeId,
   selectedEdgeKey,
   focusedNetIds,
+  nodeIps,
   onNodeClick,
   onEdgeClick,
 }: Props) {
@@ -169,15 +171,16 @@ export default function TopologyGraph({
               <rect x={p.x} y={p.y} width={NODE_W} height={NODE_H} rx="8"
                 fill="rgba(251,191,36,.06)" stroke="rgba(251,191,36,.4)"
                 strokeWidth="1" strokeDasharray="5 3" filter="url(#gT)" />
-              <circle cx={p.x + 15} cy={p.y + 19} r="3.5" fill="#fbbf24" />
-              <text x={p.x + 27} y={p.y + 16} fill="rgba(251,191,36,.9)" fontSize="9.5" fontWeight="500" pointerEvents="none">proxy</text>
-              <text x={p.x + 27} y={p.y + 28} fill="rgba(255,255,255,.4)" fontSize="8" fontFamily="'JetBrains Mono',monospace" pointerEvents="none">{n.id}</text>
+              <circle cx={p.x + 15} cy={p.y + 22} r="3.5" fill="#fbbf24" />
+              <text x={p.x + 27} y={p.y + 20} fill="rgba(251,191,36,.9)" fontSize="9.5" fontWeight="500" pointerEvents="none">proxy</text>
+              <text x={p.x + 27} y={p.y + 32} fill="rgba(255,255,255,.4)" fontSize="8" fontFamily="'JetBrains Mono',monospace" pointerEvents="none">{n.id}</text>
             </g>
           );
         }
 
         const color = n.registered ? '#34d399' : '#f87171';
         const strokeColor = n.registered ? 'rgba(52,211,153,.3)' : 'rgba(248,113,113,.2)';
+        const ip = nodeIps.get(n.id);
         return (
           <g key={n.id} onClick={() => onNodeClick(n.id)} style={{ cursor: 'pointer', opacity: nodeDimmed ? 0.12 : 1 }}>
             {isSel && (
@@ -186,9 +189,12 @@ export default function TopologyGraph({
             )}
             <rect x={p.x} y={p.y} width={NODE_W} height={NODE_H} rx="8"
               fill="rgba(255,255,255,.04)" stroke={strokeColor} strokeWidth="1" filter="url(#gT)" />
-            <circle cx={p.x + 15} cy={p.y + 19} r="3.5" fill={color} />
-            <text x={p.x + 27} y={p.y + 16} fill="rgba(255,255,255,.85)" fontSize="9.5" fontWeight="500" pointerEvents="none">{n.id}</text>
-            <text x={p.x + 27} y={p.y + 28} fill="rgba(255,255,255,.3)" fontSize="8" pointerEvents="none">
+            <circle cx={p.x + 15} cy={p.y + 17} r="3.5" fill={color} />
+            <text x={p.x + 27} y={p.y + 20} fill="rgba(255,255,255,.85)" fontSize="9.5" fontWeight="500" pointerEvents="none">{n.id}</text>
+            {ip && (
+              <text x={p.x + 27} y={p.y + 31} fill="rgba(255,255,255,.35)" fontSize="8" fontFamily="'JetBrains Mono',monospace" pointerEvents="none">{ip}</text>
+            )}
+            <text x={p.x + 27} y={p.y + (ip ? 42 : 31)} fill="rgba(255,255,255,.3)" fontSize="7.5" pointerEvents="none">
               {n.registered ? `${n.active_replica_count}/${n.replica_count} active` : 'unregistered'}
               {n.entry_point ? ' · entry' : ''}
             </text>

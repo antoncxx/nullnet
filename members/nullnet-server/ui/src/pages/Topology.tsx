@@ -41,6 +41,11 @@ export default function Topology() {
     ? new Set(graph.edges.filter(e => e.via_proxy).map(e => e.via_proxy!)).size
     : 0;
 
+  const nodeIps = new Map<string, string>();
+  for (const svc of services ?? []) {
+    if (svc.replicas.length > 0) nodeIps.set(svc.name, svc.replicas[0].ip);
+  }
+
   const focusedNetIds: Set<number> | null = focusedClientIp && sessions
     ? new Set(sessions.filter(s => s.client_ip === focusedClientIp).map(s => s.network_id))
     : null;
@@ -142,6 +147,7 @@ export default function Topology() {
                 selectedNodeId={selectedNodeId}
                 selectedEdgeKey={selectedEdgeKey}
                 focusedNetIds={focusedNetIds}
+                nodeIps={nodeIps}
                 onNodeClick={handleNodeClick}
                 onEdgeClick={handleEdgeClick}
               />

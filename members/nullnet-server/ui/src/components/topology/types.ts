@@ -1,7 +1,7 @@
 import type { GraphNodeJson } from '../../types';
 
 export const NODE_W = 130;
-export const NODE_H = 38;
+export const NODE_H = 50;
 export const H_GAP = 60;
 export const V_GAP = 70;
 

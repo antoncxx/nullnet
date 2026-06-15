@@ -1,6 +1,6 @@
-import type { GraphJson } from '../../types';
+import type { GraphJson, SessionJson } from '../../types';
 import { NODE_W, NODE_H, INET_W, INET_H, INTERNET_ID } from './types';
-import { buildTopoGraph, layoutNodes, svgDims, edgePath, inetEdgePath } from './layout';
+import { buildTopoGraph, layoutNodes, svgDims, edgePath, inetEdgePath, edgeLabelPoints } from './layout';
 
 interface Props {
   graph: GraphJson;
@@ -9,6 +9,7 @@ interface Props {
   selectedNodeId: string | null;
   selectedEdgeKey: string | null;
   focusedNetIds: Set<number> | null;
+  focusedSessions: SessionJson[] | null;
   nodeIps: Map<string, string>;
   onNodeClick: (id: string) => void;
   onEdgeClick: (fromId: string, toId: string, edgeIndices: number[]) => void;
@@ -21,6 +22,7 @@ export default function TopologyGraph({
   selectedNodeId,
   selectedEdgeKey,
   focusedNetIds,
+  focusedSessions,
   nodeIps,
   onNodeClick,
   onEdgeClick,
@@ -52,6 +54,15 @@ export default function TopologyGraph({
       }
     }
     focusedNodeIds.add(INTERNET_ID);
+  }
+
+  // Returns the physical IP for any node (proxy ID is its own IP).
+  function getNodeIp(id: string): string | null {
+    const node = nodes.find(n => n.id === id);
+    if (!node) return null;
+    if (node.kind === 'proxy') return node.id;
+    if (node.kind === 'service') return nodeIps.get(id) ?? null;
+    return null;
   }
 
   return (
@@ -112,6 +123,14 @@ export default function TopologyGraph({
         const arrowId = isSel ? 'arr-sel' : e.isProxyHop ? 'arr-proxy' : 'arr';
         const midX = (fp.x + tp.x) / 2 + NODE_W / 2;
         const midY = (fp.y + tp.y) / 2 + NODE_H / 2;
+        const isFocusedEdge = focusedNetIds != null && focusedEdgeKeys.has(edgeKey);
+        const session = isFocusedEdge
+          ? (focusedSessions?.find(s => e.originalIndices.some(i => graph.edges[i]?.net_id === s.network_id)) ?? null)
+          : null;
+        const lp = isFocusedEdge ? edgeLabelPoints(fp, tp) : null;
+        const srcIp = isFocusedEdge ? getNodeIp(e.from) : null;
+        const dstIp = isFocusedEdge ? getNodeIp(e.to) : null;
+
         return (
           <g key={i} onClick={() => onEdgeClick(e.from, e.to, e.originalIndices)} style={{ cursor: 'pointer', opacity: dimmed ? 0.1 : 1 }}>
             <path d={edgePath(fp, tp)} fill="none" stroke="transparent" strokeWidth="14" />
@@ -122,15 +141,61 @@ export default function TopologyGraph({
               markerEnd={`url(#${arrowId})`}
               pointerEvents="none"
             />
-            {!isSel && count > 1 && (
+
+            {/* Default labels — hidden when client is focused */}
+            {!isSel && !isFocusedEdge && count > 1 && (
               <text x={midX} y={midY} textAnchor="middle" fill="rgba(255,255,255,.45)" fontSize="9" pointerEvents="none">
                 {count} sessions
               </text>
             )}
-            {!isSel && count === 1 && e.setup_ms > 0 && (
+            {!isSel && !isFocusedEdge && count === 1 && e.setup_ms > 0 && (
               <text x={midX} y={midY} textAnchor="middle" fill="rgba(255,255,255,.3)" fontSize="9" pointerEvents="none">
                 net {e.net_id} · {e.setup_ms}ms
               </text>
+            )}
+
+            {/* Focused-client edge labels */}
+            {isFocusedEdge && lp && (
+              <g pointerEvents="none">
+                {srcIp && (
+                  <g>
+                    <rect x={lp.src.x - 42} y={lp.src.y - 10} width={84} height={14} rx="3"
+                      fill="rgba(3,5,8,.82)" stroke="rgba(255,255,255,.08)" />
+                    <text x={lp.src.x} y={lp.src.y} textAnchor={lp.src.anchor}
+                      fill="rgba(255,255,255,.75)" fontSize="8" fontFamily="'JetBrains Mono',monospace">
+                      {srcIp}
+                    </text>
+                  </g>
+                )}
+                {dstIp && (
+                  <g>
+                    <rect x={lp.dst.x - 42} y={lp.dst.y - 10} width={84} height={14} rx="3"
+                      fill="rgba(3,5,8,.82)" stroke="rgba(255,255,255,.08)" />
+                    <text x={lp.dst.x} y={lp.dst.y} textAnchor={lp.dst.anchor}
+                      fill="rgba(255,255,255,.75)" fontSize="8" fontFamily="'JetBrains Mono',monospace">
+                      {dstIp}
+                    </text>
+                  </g>
+                )}
+                {session && (
+                  <g>
+                    <rect x={lp.mid.x - 58} y={lp.mid.y - 24} width={116} height={48} rx="5"
+                      fill="rgba(3,5,8,.88)" stroke="rgba(255,255,255,.07)" />
+                    <text x={lp.mid.x} y={lp.mid.y - 11} textAnchor="middle"
+                      fill="rgba(91,156,246,.9)" fontSize="8.5" fontWeight="600">
+                      VNI {session.network_id}
+                    </text>
+                    <text x={lp.mid.x} y={lp.mid.y + 2} textAnchor="middle"
+                      fill="rgba(255,255,255,.5)" fontSize="7.5" fontFamily="'JetBrains Mono',monospace">
+                      {session.client_net}
+                    </text>
+                    <text x={lp.mid.x} y={lp.mid.y + 15} textAnchor="middle"
+                      fill="rgba(255,255,255,.5)" fontSize="7.5" fontFamily="'JetBrains Mono',monospace">
+                      {session.server_net}
+                    </text>
+                  </g>
+                )}
+              </g>
             )}
           </g>
         );

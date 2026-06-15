@@ -46,6 +46,10 @@ export default function Topology() {
     if (svc.replicas.length > 0) nodeIps.set(svc.name, svc.replicas[0].ip);
   }
 
+  const focusedSessions = focusedClientIp && sessions
+    ? sessions.filter(s => s.client_ip === focusedClientIp)
+    : null;
+
   const focusedNetIds: Set<number> | null = focusedClientIp && sessions
     ? new Set(sessions.filter(s => s.client_ip === focusedClientIp).map(s => s.network_id))
     : null;
@@ -147,6 +151,7 @@ export default function Topology() {
                 selectedNodeId={selectedNodeId}
                 selectedEdgeKey={selectedEdgeKey}
                 focusedNetIds={focusedNetIds}
+                focusedSessions={focusedSessions}
                 nodeIps={nodeIps}
                 onNodeClick={handleNodeClick}
                 onEdgeClick={handleEdgeClick}

@@ -137,6 +137,54 @@ export function edgePath(from: Pos, to: Pos): string {
   return `M ${x1} ${y1} C ${cx} ${y1}, ${cx} ${y2}, ${x2} ${y2}`;
 }
 
+// Positions for per-edge labels when a client is focused.
+// src/dst are placed just outside the node endpoints; mid is the curve midpoint.
+type TextAnchor = 'start' | 'middle' | 'end';
+
+export function edgeLabelPoints(from: Pos, to: Pos): {
+  src: { x: number; y: number; anchor: TextAnchor };
+  dst: { x: number; y: number; anchor: TextAnchor };
+  mid: { x: number; y: number };
+} {
+  const fromMidY = from.y + NODE_H / 2;
+  const toMidY = to.y + NODE_H / 2;
+
+  if (toMidY > fromMidY + NODE_H) {
+    // downward — exits bottom-center, enters top-center
+    const x1 = from.x + NODE_W / 2, y1 = from.y + NODE_H;
+    const x2 = to.x + NODE_W / 2,   y2 = to.y;
+    return {
+      src: { x: x1, y: y1 + 13, anchor: 'middle' },
+      dst: { x: x2, y: y2 - 7,  anchor: 'middle' },
+      mid: { x: (x1 + x2) / 2,  y: (y1 + y2) / 2 },
+    };
+  }
+  if (fromMidY > toMidY + NODE_H) {
+    // upward — exits top-center, enters bottom-center
+    const x1 = from.x + NODE_W / 2, y1 = from.y;
+    const x2 = to.x + NODE_W / 2,   y2 = to.y + NODE_H;
+    return {
+      src: { x: x1, y: y1 - 7,  anchor: 'middle' },
+      dst: { x: x2, y: y2 + 13, anchor: 'middle' },
+      mid: { x: (x1 + x2) / 2,  y: (y1 + y2) / 2 },
+    };
+  }
+  // horizontal — exits left/right side
+  const goRight = to.x >= from.x;
+  const x1 = goRight ? from.x + NODE_W : from.x;
+  const y1 = from.y + NODE_H / 2;
+  const x2 = goRight ? to.x : to.x + NODE_W;
+  const y2 = to.y + NODE_H / 2;
+  const midX = (x1 + x2) / 2;
+  const midY = (y1 + y2) / 2;
+  const t = goRight ? 1 : -1;
+  return {
+    src: { x: x1 + t * 10, y: midY - 16, anchor: 'middle' },
+    dst: { x: x2 - t * 10, y: midY - 16, anchor: 'middle' },
+    mid: { x: midX, y: midY },
+  };
+}
+
 export function inetEdgePath(from: Pos, to: Pos): string {
   const x1 = from.x + INET_W / 2;
   const y1 = from.y + INET_H;

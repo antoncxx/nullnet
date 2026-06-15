@@ -1,4 +1,5 @@
 mod cert;
+mod cert_renewal;
 mod certs;
 mod crypto;
 mod env;
@@ -51,6 +52,12 @@ async fn main() -> Result<(), Error> {
         events: nullnet.orchestrator().events.clone(),
         orchestrator: nullnet.orchestrator().clone(),
     };
+
+    // auto-renew ACME certs nearing expiry (those with stored DNS credentials)
+    cert_renewal::start(
+        app_state.events.clone(),
+        cert_renewal::RenewalConfig::from_env(),
+    );
 
     tokio::select! {
         result = server

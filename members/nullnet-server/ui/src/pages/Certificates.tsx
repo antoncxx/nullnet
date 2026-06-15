@@ -64,12 +64,6 @@ export default function Certificates() {
   const { data: certs, loading, refetch } = useApi<CertJson[]>('/api/certificates', 10000);
   const [deleting, setDeleting] = useState<Set<string>>(new Set());
 
-  const [domain, setDomain] = useState('');
-  const [fullchain, setFullchain] = useState('');
-  const [key, setKey] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-  const [formError, setFormError] = useState<string | null>(null);
-
   // Let's Encrypt (ACME / DNS-01) request form
   const [leDomain, setLeDomain] = useState('');
   const [providerId, setProviderId] = useState(PROVIDERS[0].id);
@@ -82,34 +76,6 @@ export default function Certificates() {
 
   const list = certs ?? [];
   const existing = new Set(list.map(c => c.domain));
-  const isRenew = existing.has(domain.trim());
-
-  async function readInto(file: File | undefined, set: (v: string) => void) {
-    if (file) set(await file.text());
-  }
-
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    setFormError(null);
-    setSubmitting(true);
-    try {
-      const res = await fetch('/api/certificates', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ domain: domain.trim(), fullchain_pem: fullchain, key_pem: key }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-        throw new Error(body.error ?? `HTTP ${res.status}`);
-      }
-      setDomain(''); setFullchain(''); setKey('');
-      refetch();
-    } catch (err) {
-      setFormError(String(err instanceof Error ? err.message : err));
-    } finally {
-      setSubmitting(false);
-    }
-  }
 
   async function requestLe(e: React.FormEvent) {
     e.preventDefault();
@@ -154,8 +120,6 @@ export default function Certificates() {
     }
   }
 
-  const canSubmit = domain.trim() !== '' && fullchain.includes('BEGIN CERTIFICATE') && key.includes('PRIVATE KEY') && !submitting;
-
   const leRenew = existing.has(leDomain.trim());
   const credsComplete = provider.fields.every(f => f.optional || (creds[f.key] ?? '').trim() !== '');
   const canRequest = leDomain.trim() !== '' && credsComplete && !leSubmitting;
@@ -178,12 +142,13 @@ export default function Certificates() {
               <tr>
                 <th>Domain</th>
                 <th>Expires</th>
+                <th>Renewal</th>
                 <th></th>
               </tr>
             </thead>
             <tbody>
               {loading && (
-                <tr><td colSpan={3} style={{ color: 'var(--t2)', padding: '20px 16px' }}>Loading…</td></tr>
+                <tr><td colSpan={4} style={{ color: 'var(--t2)', padding: '20px 16px' }}>Loading…</td></tr>
               )}
               {list.map(c => {
                 const exp = formatExpiry(c.expires_at);
@@ -191,6 +156,10 @@ export default function Certificates() {
                   <tr key={c.domain}>
                     <td style={{ fontWeight: 500, fontFamily: "'JetBrains Mono',monospace" }}>{c.domain}</td>
                     <td style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 11, color: exp.color }}>{exp.text}</td>
+                    <td style={{ fontSize: 11, color: c.auto_renew ? 'var(--t1)' : 'var(--t2)' }}
+                        title={c.auto_renew ? 'Renews automatically via Let’s Encrypt before expiry' : 'Manual cert — replace it yourself before expiry'}>
+                      {c.auto_renew ? 'Auto' : 'Manual'}
+                    </td>
                     <td>
                       <button className="teardown-btn" onClick={() => remove(c.domain)} disabled={deleting.has(c.domain)}>
                         {deleting.has(c.domain) ? '…' : 'Delete'}
@@ -200,7 +169,7 @@ export default function Certificates() {
                 );
               })}
               {!loading && list.length === 0 && (
-                <tr><td colSpan={3} style={{ color: 'var(--t2)', padding: '20px 16px' }}>No certificates installed</td></tr>
+                <tr><td colSpan={4} style={{ color: 'var(--t2)', padding: '20px 16px' }}>No certificates installed</td></tr>
               )}
             </tbody>
           </table>
@@ -208,65 +177,8 @@ export default function Certificates() {
 
         <div className="card" style={{ marginTop: 16 }}>
           <div className="card-head">
-            <span className="card-label">{isRenew ? 'Renew / replace certificate' : 'Add certificate'}</span>
-            {isRenew && <span style={{ fontSize: 11, color: 'var(--amber)' }}>overwrites existing «{domain.trim()}»</span>}
-          </div>
-          <form onSubmit={submit} style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <span style={{ fontSize: 12, color: 'var(--t2)' }}>Domain (exact or *.wildcard)</span>
-              <input
-                value={domain}
-                onChange={e => setDomain(e.target.value)}
-                placeholder="app.example.com"
-                spellCheck={false}
-                style={{ fontFamily: "'JetBrains Mono',monospace", padding: '6px 8px' }}
-              />
-            </label>
-
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <span style={{ fontSize: 12, color: 'var(--t2)' }}>
-                Fullchain PEM (leaf + intermediates) ·{' '}
-                <input type="file" accept=".pem,.crt,.cer" onChange={e => readInto(e.target.files?.[0], setFullchain)} style={{ fontSize: 11 }} />
-              </span>
-              <textarea
-                value={fullchain}
-                onChange={e => setFullchain(e.target.value)}
-                placeholder="-----BEGIN CERTIFICATE-----"
-                spellCheck={false}
-                rows={5}
-                style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 11, padding: '6px 8px', resize: 'vertical' }}
-              />
-            </label>
-
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <span style={{ fontSize: 12, color: 'var(--t2)' }}>
-                Private key PEM ·{' '}
-                <input type="file" accept=".pem,.key" onChange={e => readInto(e.target.files?.[0], setKey)} style={{ fontSize: 11 }} />
-              </span>
-              <textarea
-                value={key}
-                onChange={e => setKey(e.target.value)}
-                placeholder="-----BEGIN PRIVATE KEY-----"
-                spellCheck={false}
-                rows={5}
-                style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 11, padding: '6px 8px', resize: 'vertical' }}
-              />
-            </label>
-
-            {formError && <span style={{ color: 'var(--red, #e5484d)', fontSize: 12 }}>{formError}</span>}
-
-            <div>
-              <button type="submit" className="teardown-btn" disabled={!canSubmit}>
-                {submitting ? 'Saving…' : isRenew ? 'Replace certificate' : 'Add certificate'}
-              </button>
-            </div>
-          </form>
-        </div>
-
-        <div className="card" style={{ marginTop: 16 }}>
-          <div className="card-head">
             <span className="card-label">Request via Let's Encrypt (DNS-01)</span>
-            <span style={{ fontSize: 11, color: 'var(--t2)' }}>credentials used once · not stored</span>
+            <span style={{ fontSize: 11, color: 'var(--t2)' }}>credentials stored encrypted · auto-renews before expiry</span>
           </div>
           <form onSubmit={requestLe} style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
             <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>

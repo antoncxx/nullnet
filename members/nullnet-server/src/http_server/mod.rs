@@ -38,10 +38,7 @@ pub async fn serve(state: AppState) {
         .route("/api/graph/{stack}", get(graph::graph_handler))
         .route("/api/sessions", get(sessions::list_handler))
         .route("/api/sessions/{id}", delete(sessions::teardown_handler))
-        .route(
-            "/api/certificates",
-            get(certificates::list_handler).post(certificates::upload_handler),
-        )
+        .route("/api/certificates", get(certificates::list_handler))
         .route(
             "/api/certificates/request",
             post(certificates::request_handler),

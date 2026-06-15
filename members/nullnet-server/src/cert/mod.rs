@@ -1,9 +1,11 @@
 //! ACME (Let's Encrypt) certificate issuance via DNS-01, ported from ../routix.
-//! Credentials are supplied inline per request and never persisted.
+//! Credentials are supplied inline per request; for ACME-issued certs they are
+//! also stored encrypted at rest (see `certs::store_dns_credentials`) so the cert
+//! can be auto-renewed unattended (see `cert_renewal`).
 mod dns_providers;
 use async_trait::async_trait;
 pub use dns_providers::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 mod authority;
 
@@ -17,7 +19,7 @@ pub use authority::*;
 /// { "provider": "cloudflare", "api_token": "..." }
 /// { "provider": "azure", "tenant_id": "...", "client_id": "...", "client_secret": "...", "subscription_id": "...", "resource_group": "..." }
 /// ```
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "provider", rename_all = "snake_case")]
 pub enum DnsProviderCredentials {
     Azure {
@@ -243,5 +245,19 @@ mod tests {
     #[test]
     fn unknown_provider_is_rejected() {
         assert!(serde_json::from_str::<DnsProviderCredentials>(r#"{"provider":"nope"}"#).is_err());
+    }
+
+    #[test]
+    fn serialize_round_trips_for_storage() {
+        // auto-renew stores creds as JSON then re-parses them on renewal, so the
+        // serialize side must round-trip with the provider tag and field renames intact
+        let original = r#"{"provider":"route53","access_key_id":"a","secret_access_key":"s","region":"eu-west-1"}"#;
+        let json = serde_json::to_string(&parse(original)).expect("serializes");
+        let back = parse(&json);
+        assert_eq!(back.provider_name(), "route53");
+        assert!(matches!(
+            back,
+            DnsProviderCredentials::Route53 { region: Some(r), .. } if r == "eu-west-1"
+        ));
     }
 }

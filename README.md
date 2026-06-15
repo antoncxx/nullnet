@@ -41,8 +41,18 @@ The repository should be cloned under `/root` so the provided `setup-*.sh` scrip
   CERT_ENCRYPTION_KEY=<32 raw bytes or 64 hex chars>
   ```
   `CERT_ENCRYPTION_KEY` is **required** — the server refuses to start without it. It encrypts
-  TLS certificate private keys at rest; keep it stable, since rotating it makes existing
-  encrypted keys undecryptable. Generate one with `openssl rand -hex 32`.
+  TLS certificate private keys (and the DNS-provider credentials of ACME-issued certs) at rest;
+  keep it stable, since rotating it makes existing encrypted data undecryptable. Generate one with
+  `openssl rand -hex 32`.
+
+- TLS certificates are issued from Let's Encrypt via a DNS-01 challenge (UI: *Certificates* page).
+  Each cert stores its DNS-provider credentials encrypted at rest and is **renewed automatically**
+  before expiry. The renewal scan is tunable via optional env vars (defaults shown):
+  ```
+  CERT_RENEWAL_CHECK_INTERVAL_SECS=43200   # how often to scan (12h)
+  CERT_RENEWAL_DAYS_BEFORE=30              # renew when expiring within N days
+  CERT_RENEWAL_DNS_PROPAGATION_SECS=30     # wait after writing the TXT record
+  ```
 
 - service configuration is split per **stack** — one TOML file per stack under
   `members/nullnet-server/services/`. The filename (minus `.toml`) is the stack name.

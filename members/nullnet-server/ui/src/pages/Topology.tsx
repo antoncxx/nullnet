@@ -17,8 +17,9 @@ export default function Topology() {
   const [panel, setPanel] = useState<PanelState>(null);
   const [showRegistered, setShowRegistered] = useState(true);
   const [showUnregistered, setShowUnregistered] = useState(true);
+  const [focusedClientIp, setFocusedClientIp] = useState<string | null>(null);
 
-  useEffect(() => { setPanel(null); }, [stack]);
+  useEffect(() => { setPanel(null); setFocusedClientIp(null); }, [stack]);
 
   const refetchRef = useRef(refetch);
   refetchRef.current = refetch;
@@ -39,6 +40,10 @@ export default function Topology() {
   const proxyCount = graph
     ? new Set(graph.edges.filter(e => e.via_proxy).map(e => e.via_proxy!)).size
     : 0;
+
+  const focusedNetIds: Set<number> | null = focusedClientIp && sessions
+    ? new Set(sessions.filter(s => s.client_ip === focusedClientIp).map(s => s.network_id))
+    : null;
 
   const selectedNodeId =
     panel?.type === 'node' ? panel.nodeId :
@@ -136,6 +141,7 @@ export default function Topology() {
                 showUnregistered={showUnregistered}
                 selectedNodeId={selectedNodeId}
                 selectedEdgeKey={selectedEdgeKey}
+                focusedNetIds={focusedNetIds}
                 onNodeClick={handleNodeClick}
                 onEdgeClick={handleEdgeClick}
               />
@@ -200,8 +206,10 @@ export default function Topology() {
           graph={graph}
           services={services ?? null}
           sessions={sessions ?? null}
+          focusedClientIp={focusedClientIp}
           onClose={() => setPanel(null)}
           onNodeClick={handleNodeClick}
+          onClientFocus={ip => setFocusedClientIp(prev => prev === ip ? null : ip)}
         />
       )}
     </Layout>

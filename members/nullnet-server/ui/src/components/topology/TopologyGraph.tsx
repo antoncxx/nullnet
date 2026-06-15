@@ -8,6 +8,7 @@ interface Props {
   showUnregistered: boolean;
   selectedNodeId: string | null;
   selectedEdgeKey: string | null;
+  focusedNetIds: Set<number> | null;
   onNodeClick: (id: string) => void;
   onEdgeClick: (fromId: string, toId: string, edgeIndices: number[]) => void;
 }
@@ -18,6 +19,7 @@ export default function TopologyGraph({
   showUnregistered,
   selectedNodeId,
   selectedEdgeKey,
+  focusedNetIds,
   onNodeClick,
   onEdgeClick,
 }: Props) {
@@ -34,6 +36,21 @@ export default function TopologyGraph({
 
   const pos = layoutNodes(nodes, edges);
   const { w, h } = svgDims(pos, nodes);
+
+  // Compute which nodes/edges are touched by the focused client's sessions.
+  const focusedEdgeKeys = new Set<string>();
+  const focusedNodeIds = new Set<string>();
+  if (focusedNetIds) {
+    for (const e of edges) {
+      if (e.isInternetEdge) continue;
+      if (e.originalIndices.some(i => focusedNetIds.has(graph.edges[i]?.net_id))) {
+        focusedEdgeKeys.add(`${e.from}\0${e.to}`);
+        focusedNodeIds.add(e.from);
+        focusedNodeIds.add(e.to);
+      }
+    }
+    focusedNodeIds.add(INTERNET_ID);
+  }
 
   return (
     <svg
@@ -62,6 +79,7 @@ export default function TopologyGraph({
         const fp = pos.get(e.from);
         const tp = pos.get(e.to);
         if (!fp || !tp) return null;
+        const dimmed = focusedNetIds != null && !focusedNodeIds.has(e.to);
         return (
           <path
             key={`inet-${i}`}
@@ -72,6 +90,7 @@ export default function TopologyGraph({
             strokeDasharray="4 3"
             markerEnd="url(#arr-inet)"
             pointerEvents="none"
+            opacity={dimmed ? 0.1 : 1}
           />
         );
       })}
@@ -83,6 +102,7 @@ export default function TopologyGraph({
         if (!fp || !tp) return null;
         const edgeKey = `${e.from}\0${e.to}`;
         const isSel = selectedEdgeKey === edgeKey;
+        const dimmed = focusedNetIds != null && !focusedEdgeKeys.has(edgeKey);
         const count = e.originalIndices.length;
         const stroke = isSel
           ? 'rgba(91,156,246,.9)'
@@ -91,7 +111,7 @@ export default function TopologyGraph({
         const midX = (fp.x + tp.x) / 2 + NODE_W / 2;
         const midY = (fp.y + tp.y) / 2 + NODE_H / 2;
         return (
-          <g key={i} onClick={() => onEdgeClick(e.from, e.to, e.originalIndices)} style={{ cursor: 'pointer' }}>
+          <g key={i} onClick={() => onEdgeClick(e.from, e.to, e.originalIndices)} style={{ cursor: 'pointer', opacity: dimmed ? 0.1 : 1 }}>
             <path d={edgePath(fp, tp)} fill="none" stroke="transparent" strokeWidth="14" />
             <path
               d={edgePath(fp, tp)} fill="none" stroke={stroke}
@@ -119,10 +139,11 @@ export default function TopologyGraph({
         const p = pos.get(n.id);
         if (!p) return null;
         const isSel = n.id === selectedNodeId;
+        const nodeDimmed = focusedNetIds != null && !focusedNodeIds.has(n.id);
 
         if (n.kind === 'internet') {
           return (
-            <g key={INTERNET_ID} onClick={() => onNodeClick(INTERNET_ID)} style={{ cursor: 'pointer' }}>
+            <g key={INTERNET_ID} onClick={() => onNodeClick(INTERNET_ID)} style={{ cursor: 'pointer', opacity: nodeDimmed ? 0.12 : 1 }}>
               {isSel && (
                 <rect x={p.x - 3} y={p.y - 3} width={INET_W + 6} height={INET_H + 6} rx="14"
                   fill="none" stroke="rgba(91,156,246,.6)" strokeWidth="1.5" />
@@ -140,7 +161,7 @@ export default function TopologyGraph({
 
         if (n.kind === 'proxy') {
           return (
-            <g key={n.id} onClick={() => onNodeClick(n.id)} style={{ cursor: 'pointer' }}>
+            <g key={n.id} onClick={() => onNodeClick(n.id)} style={{ cursor: 'pointer', opacity: nodeDimmed ? 0.12 : 1 }}>
               {isSel && (
                 <rect x={p.x - 3} y={p.y - 3} width={NODE_W + 6} height={NODE_H + 6} rx="10"
                   fill="none" stroke="rgba(91,156,246,.6)" strokeWidth="1.5" />
@@ -158,7 +179,7 @@ export default function TopologyGraph({
         const color = n.registered ? '#34d399' : '#f87171';
         const strokeColor = n.registered ? 'rgba(52,211,153,.3)' : 'rgba(248,113,113,.2)';
         return (
-          <g key={n.id} onClick={() => onNodeClick(n.id)} style={{ cursor: 'pointer' }}>
+          <g key={n.id} onClick={() => onNodeClick(n.id)} style={{ cursor: 'pointer', opacity: nodeDimmed ? 0.12 : 1 }}>
             {isSel && (
               <rect x={p.x - 3} y={p.y - 3} width={NODE_W + 6} height={NODE_H + 6} rx="10"
                 fill="none" stroke="rgba(91,156,246,.6)" strokeWidth="1.5" />

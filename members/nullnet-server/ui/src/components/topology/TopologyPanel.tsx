@@ -10,11 +10,13 @@ interface Props {
   graph: GraphJson;
   services: ServiceJson[] | null;
   sessions: SessionJson[] | null;
+  focusedClientIp: string | null;
   onClose: () => void;
   onNodeClick: (id: string) => void;
+  onClientFocus: (ip: string) => void;
 }
 
-export default function TopologyPanel({ panel, graph, services, sessions, onClose, onNodeClick }: Props) {
+export default function TopologyPanel({ panel, graph, services, sessions, focusedClientIp, onClose, onNodeClick, onClientFocus }: Props) {
   function getTitle(): string {
     if (!panel) return '–';
     if (panel.type === 'internet') return 'Internet Clients';
@@ -26,7 +28,13 @@ export default function TopologyPanel({ panel, graph, services, sessions, onClos
     if (!panel) return null;
 
     if (panel.type === 'internet') {
-      return <InternetPanel sessions={sessions ?? []} />;
+      return (
+        <InternetPanel
+          sessions={sessions ?? []}
+          focusedClientIp={focusedClientIp}
+          onClientFocus={onClientFocus}
+        />
+      );
     }
 
     if (panel.type === 'edge') {

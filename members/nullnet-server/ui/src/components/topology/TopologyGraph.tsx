@@ -5,8 +5,6 @@ import ZoomFrame from './ZoomFrame';
 export default function TopologyGraph() {
   const { graph } = useTopologyData();
   const {
-    showRegistered,
-    showUnregistered,
     selectedNodeId,
     selectedEdgeKey,
     focusedNetIds,
@@ -21,8 +19,6 @@ export default function TopologyGraph() {
     <ZoomFrame height={520}>
       <TopologyGraphSvg
         graph={graph}
-        showRegistered={showRegistered}
-        showUnregistered={showUnregistered}
         selectedNodeId={selectedNodeId}
         selectedEdgeKey={selectedEdgeKey}
         focusedNetIds={focusedNetIds}

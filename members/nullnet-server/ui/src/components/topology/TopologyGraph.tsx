@@ -1,5 +1,6 @@
 import { useTopologyData, useTopologyUI } from './TopologyContext';
 import TopologyGraphSvg from './TopologyGraphSvg';
+import ZoomFrame from './ZoomFrame';
 
 export default function TopologyGraph() {
   const { graph } = useTopologyData();
@@ -17,19 +18,21 @@ export default function TopologyGraph() {
   if (!graph) return null;
 
   return (
-    <TopologyGraphSvg
-      graph={graph}
-      showRegistered={showRegistered}
-      showUnregistered={showUnregistered}
-      selectedNodeId={selectedNodeId}
-      selectedEdgeKey={selectedEdgeKey}
-      focusedNetIds={focusedNetIds}
-      focusedSessions={focusedSessions}
-      nodeIps={nodeIps}
-      onNodeClick={id => dispatch({ type: 'NODE_CLICKED', nodeId: id })}
-      onEdgeClick={(fromId, toId, edgeIndices) =>
-        dispatch({ type: 'EDGE_CLICKED', fromId, toId, edgeIndices })
-      }
-    />
+    <ZoomFrame height={520}>
+      <TopologyGraphSvg
+        graph={graph}
+        showRegistered={showRegistered}
+        showUnregistered={showUnregistered}
+        selectedNodeId={selectedNodeId}
+        selectedEdgeKey={selectedEdgeKey}
+        focusedNetIds={focusedNetIds}
+        focusedSessions={focusedSessions}
+        nodeIps={nodeIps}
+        onNodeClick={id => dispatch({ type: 'NODE_CLICKED', nodeId: id })}
+        onEdgeClick={(fromId, toId, edgeIndices) =>
+          dispatch({ type: 'EDGE_CLICKED', fromId, toId, edgeIndices })
+        }
+      />
+    </ZoomFrame>
   );
 }

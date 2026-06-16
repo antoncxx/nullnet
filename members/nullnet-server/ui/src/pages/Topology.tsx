@@ -70,7 +70,7 @@ function TopologyView() {
               ) : 'loading…'}
             </span>
           </div>
-          <div style={{ background: 'rgba(0,0,0,.25)', padding: 16, minHeight: 200 }}>
+          <div style={{ background: 'rgba(0,0,0,.25)', padding: 0 }}>
             {!graph && (
               <div style={{ color: 'var(--t2)', fontSize: 11, padding: '40px 0', textAlign: 'center' }}>
                 loading topology…

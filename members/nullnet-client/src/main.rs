@@ -112,7 +112,7 @@ async fn main() -> Result<(), Error> {
 
     // listen on the gRPC control channel
     tokio::spawn(async move {
-        control_channel(
+        if let Err(e) = control_channel(
             grpc_server2,
             peers_2,
             rtnetlink_handle,
@@ -120,7 +120,13 @@ async fn main() -> Result<(), Error> {
             host_mappings_state,
         )
         .await
-        .expect("Control channel failed");
+        {
+            eprintln!("Control channel failed: {e:?}");
+        }
+        // control_channel only returns when the server stream drops (server
+        // down). Exit so the supervisor restarts us with a clean env.
+        eprintln!("Control channel to server closed; exiting for restart");
+        process::exit(1);
     });
 
     // NFQUEUE listener owns trigger detection: kernel queues the first

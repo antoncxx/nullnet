@@ -22,9 +22,15 @@ impl NullnetGrpcInterface {
     pub async fn new(host: &str, port: u16, tls: bool) -> Result<Self, String> {
         let protocol = if tls { "https" } else { "http" };
 
+        // Keepalive so a dead/unreachable server breaks open streams within
+        // ~30s (PING every 10s, drop if unacked for 20s) instead of hanging.
+        // Consumers rely on the stream erroring out to exit and be restarted.
         let mut endpoint = Channel::from_shared(format!("{protocol}://{host}:{port}"))
             .map_err(|e| e.to_string())?
-            .connect_timeout(std::time::Duration::from_secs(10));
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .http2_keep_alive_interval(std::time::Duration::from_secs(10))
+            .keep_alive_timeout(std::time::Duration::from_secs(20))
+            .keep_alive_while_idle(true);
 
         if tls {
             endpoint = endpoint

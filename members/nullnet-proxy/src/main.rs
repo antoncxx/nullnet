@@ -297,40 +297,41 @@ fn https_redirect_url(req: &RequestHeader, https_port: u16) -> String {
 }
 
 /// Subscribe to the control service's certificate stream and atomically swap the
-/// proxy's cert store on every push (initial set + each change). Reconnects with
-/// a short backoff if the stream drops.
+/// proxy's cert store on every push (initial set + each change). The stream is
+/// also our server-liveness signal: when it drops (server down) we exit so the
+/// supervisor restarts us with a clean env.
 async fn watch_certificates(server: NullnetGrpcInterface, store: Arc<ArcSwap<CertStore>>) {
-    loop {
-        match server.watch_certificates().await {
-            Ok(mut stream) => loop {
-                match stream.message().await {
-                    Ok(Some(bundle)) => {
-                        let (new_store, failures) = CertStore::from_bundle(&bundle);
-                        let n = new_store.len();
-                        store.store(Arc::new(new_store));
-                        println!("Loaded {n} TLS certificate(s) from control service");
-                        for (domain, reason) in failures {
-                            eprintln!("Skipping TLS certificate for '{domain}': {reason}");
-                            let _ = server
-                                .report_event(AgentEvent {
-                                    event: Some(AgentEventKind::TlsCertificateInvalid(
-                                        AgentTlsCertificateInvalid { domain, reason },
-                                    )),
-                                })
-                                .await;
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        eprintln!("Certificate watch stream error: {e}");
-                        break;
+    match server.watch_certificates().await {
+        Ok(mut stream) => loop {
+            match stream.message().await {
+                Ok(Some(bundle)) => {
+                    let (new_store, failures) = CertStore::from_bundle(&bundle);
+                    let n = new_store.len();
+                    store.store(Arc::new(new_store));
+                    println!("Loaded {n} TLS certificate(s) from control service");
+                    for (domain, reason) in failures {
+                        eprintln!("Skipping TLS certificate for '{domain}': {reason}");
+                        let _ = server
+                            .report_event(AgentEvent {
+                                event: Some(AgentEventKind::TlsCertificateInvalid(
+                                    AgentTlsCertificateInvalid { domain, reason },
+                                )),
+                            })
+                            .await;
                     }
                 }
-            },
-            Err(e) => eprintln!("Failed to open certificate watch stream: {e}"),
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                Ok(None) => break,
+                Err(e) => {
+                    eprintln!("Certificate watch stream error: {e}");
+                    break;
+                }
+            }
+        },
+        Err(e) => eprintln!("Failed to open certificate watch stream: {e}"),
     }
+    // Stream to the control service dropped (server down). Exit for restart.
+    eprintln!("Certificate watch stream to server closed; exiting for restart");
+    process::exit(1);
 }
 
 #[cfg(test)]

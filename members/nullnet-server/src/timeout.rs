@@ -47,6 +47,16 @@ pub(crate) async fn apply_timeouts(
     if !changes.is_empty() {
         apply_changes(changes, services, None, orchestrator, stack).await;
     }
+
+    // Safety net: enforce the invariant that every idle Docker-backed replica is
+    // paused, catching any missed by the per-event hooks (startup, races,
+    // restarts). Cheap when nothing is pending — `reconcile_suspends` skips
+    // replicas that are already suspended or still have clients.
+    for si in services.values_mut() {
+        if let ServiceInfo::Registered(reg) = si {
+            reg.reconcile_suspends(orchestrator).await;
+        }
+    }
 }
 
 fn collect_timed_out_clients(services: &HashMap<String, ServiceInfo>) -> Vec<ServiceChange> {

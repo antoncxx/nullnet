@@ -185,6 +185,9 @@ pub(crate) struct Replica {
     port: u16,
     docker_container: Option<String>,
     clients: Clients,
+    /// Whether the backing Docker container is currently paused. Invariant for
+    /// Docker-backed replicas: `suspended ⟺ clients is empty`.
+    suspended: bool,
 }
 
 impl Replica {
@@ -194,6 +197,7 @@ impl Replica {
             port,
             docker_container,
             clients: Clients::default(),
+            suspended: false,
         }
     }
 
@@ -216,6 +220,26 @@ impl Replica {
     /// A replica is uniquely identified by its `(ip, docker_container)` pair.
     pub(crate) fn matches_identity(&self, ip: IpAddr, docker_container: Option<&str>) -> bool {
         self.ip == ip && self.docker_container.as_deref() == docker_container
+    }
+
+    pub(crate) fn suspended(&self) -> bool {
+        self.suspended
+    }
+
+    /// Pause this replica's Docker container when it is Docker-backed, has no
+    /// clients, and isn't already suspended. Fire-and-forget; flips the flag so
+    /// the invariant `suspended ⟺ no clients` holds.
+    async fn reconcile_suspend(&mut self, orchestrator: &Orchestrator) {
+        if self.suspended || !self.clients.clients().is_empty() {
+            return;
+        }
+        let Some(container) = self.docker_container.clone() else {
+            return;
+        };
+        orchestrator
+            .send_container_suspend(self.ip, container)
+            .await;
+        self.suspended = true;
     }
 }
 
@@ -318,9 +342,39 @@ impl RegisteredServiceInfo {
                             ci.net_id(),
                         )
                         .await;
+                    // Invariant: a Docker-backed replica with no clients is paused.
+                    replica.reconcile_suspend(orchestrator).await;
                 }
                 return;
             }
+        }
+    }
+
+    /// Pause every Docker-backed replica that is idle and not yet suspended.
+    /// Used as the registration-time and periodic safety net that enforces the
+    /// invariant for replicas missed by the per-event hooks.
+    pub(crate) async fn reconcile_suspends(&mut self, orchestrator: &Orchestrator) {
+        for replica in &mut self.replicas {
+            replica.reconcile_suspend(orchestrator).await;
+        }
+    }
+
+    /// Whether the replica identified by `(ip, docker)` is currently suspended.
+    pub(crate) fn replica_suspended(&self, ip: IpAddr, docker: Option<&str>) -> bool {
+        self.replicas
+            .iter()
+            .find(|r| r.matches_identity(ip, docker))
+            .is_some_and(Replica::suspended)
+    }
+
+    /// Clear the suspended flag for `(ip, docker)` after a successful unpause.
+    pub(crate) fn mark_replica_resumed(&mut self, ip: IpAddr, docker: Option<&str>) {
+        if let Some(replica) = self
+            .replicas
+            .iter_mut()
+            .find(|r| r.matches_identity(ip, docker))
+        {
+            replica.suspended = false;
         }
     }
 

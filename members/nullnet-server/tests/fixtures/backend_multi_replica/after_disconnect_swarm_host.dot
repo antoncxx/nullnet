@@ -3,12 +3,12 @@ digraph G {
 	node [color=white, fontcolor=white];
 	edge [color=white, fontcolor=white, fontsize=9, labelangle=180, labeldistance=0.8];
 
-	"A" [label="A (0/1)"] [style=solid, color=green];
+	"A" [label="A\n0 active / 0 paused / 1 total"] [style=solid, color=green];
 
-	"B" [label="B (1/1)"] [style=dashed, color=green];
+	"B" [label="B\n1 active / 0 paused / 1 total"] [style=dashed, color=green];
 	"D" -> "B" [label="VXLAN 102 [0ms]"];
 
-	"D" [label="D (1/1)"] [style=solid, color=green];
+	"D" [label="D\n1 active / 0 paused / 1 total"] [style=solid, color=green];
 
-	"E" [label="E (0/1)"] [style=solid, color=green];
+	"E" [label="E\n0 active / 0 paused / 1 total"] [style=solid, color=green];
 }

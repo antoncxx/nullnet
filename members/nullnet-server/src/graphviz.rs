@@ -131,7 +131,9 @@ impl ServiceInfo {
                         ))
                 })
                 .count();
-            return format!("{name} ({active}/{total})");
+            let paused = reg.replicas().iter().filter(|r| r.suspended()).count();
+            // Counts go on their own line (\n) so the node doesn't grow too wide.
+            return format!("{name}\\n{active} active / {paused} paused / {total} total");
         }
         name.to_string()
     }
@@ -181,6 +183,7 @@ struct GraphNodeJson {
     entry_point: bool,
     replica_count: usize,
     active_replica_count: usize,
+    paused_replica_count: usize,
 }
 
 #[derive(Serialize)]
@@ -201,30 +204,33 @@ pub(crate) fn render_graph_json(services: &HashMap<String, ServiceInfo>) -> Grap
         .map(|(name, info)| {
             let registered = matches!(info, ServiceInfo::Registered(_));
             let entry_point = info.timeout().is_some();
-            let (replica_count, active_replica_count) = if let ServiceInfo::Registered(reg) = info {
-                let total = reg.replicas().len();
-                let active = reg
-                    .replicas()
-                    .iter()
-                    .filter(|r| {
-                        !r.clients().is_empty()
-                            || initiators.contains(&(
-                                name.clone(),
-                                r.ip(),
-                                r.docker_container().map(String::from),
-                            ))
-                    })
-                    .count();
-                (total, active)
-            } else {
-                (0, 0)
-            };
+            let (replica_count, active_replica_count, paused_replica_count) =
+                if let ServiceInfo::Registered(reg) = info {
+                    let total = reg.replicas().len();
+                    let active = reg
+                        .replicas()
+                        .iter()
+                        .filter(|r| {
+                            !r.clients().is_empty()
+                                || initiators.contains(&(
+                                    name.clone(),
+                                    r.ip(),
+                                    r.docker_container().map(String::from),
+                                ))
+                        })
+                        .count();
+                    let paused = reg.replicas().iter().filter(|r| r.suspended()).count();
+                    (total, active, paused)
+                } else {
+                    (0, 0, 0)
+                };
             GraphNodeJson {
                 id: name.clone(),
                 registered,
                 entry_point,
                 replica_count,
                 active_replica_count,
+                paused_replica_count,
             }
         })
         .collect();

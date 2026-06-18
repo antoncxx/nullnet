@@ -7,6 +7,7 @@ export interface ReplicaJson {
   port: number;
   docker_container?: string;
   active_sessions: number;
+  suspended: boolean;
 }
 
 export interface ServiceJson {
@@ -114,6 +115,7 @@ export interface GraphNodeJson {
   entry_point: boolean;
   replica_count: number;
   active_replica_count: number;
+  paused_replica_count: number;
 }
 
 export interface GraphEdgeJson {

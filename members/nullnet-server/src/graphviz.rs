@@ -59,7 +59,7 @@ pub(crate) fn render_graphviz(services: &HashMap<String, ServiceInfo>) -> String
         let style = info.graphviz_style();
         let label = info.graphviz_label(name, &initiators);
         let _ =
-            writeln!(graphviz, "\t\"{name}\" [label=\"{label}\"] {style};").handle_err(location!());
+            writeln!(graphviz, "\t\"{name}\" [label=<{label}>] {style};").handle_err(location!());
         if let ServiceInfo::Registered(registered) = info {
             let mut edges: Vec<_> = registered
                 .replicas()
@@ -132,8 +132,11 @@ impl ServiceInfo {
                 })
                 .count();
             let paused = reg.replicas().iter().filter(|r| r.suspended()).count();
-            // Counts go on their own line (\n) so the node doesn't grow too wide.
-            return format!("{name}\\n{active} active / {paused} paused / {total} total");
+            // HTML-like label: counts on their own line at edge-label size (9) so
+            // the node stays narrow and the name keeps the default size.
+            return format!(
+                "{name}<BR/><FONT POINT-SIZE=\"9\">{active} active / {paused} paused / {total} total</FONT>"
+            );
         }
         name.to_string()
     }

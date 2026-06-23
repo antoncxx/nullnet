@@ -154,8 +154,8 @@ export function edgeLabelPoints(from: Pos, to: Pos): {
     const x1 = from.x + NODE_W / 2, y1 = from.y + NODE_H;
     const x2 = to.x + NODE_W / 2,   y2 = to.y;
     return {
-      src: { x: x1, y: y1 + 13, anchor: 'middle' },
-      dst: { x: x2, y: y2 - 7,  anchor: 'middle' },
+      src: { x: x1, y: y1 + 10, anchor: 'middle' },
+      dst: { x: x2, y: y2 - 4,  anchor: 'middle' },
       mid: { x: (x1 + x2) / 2,  y: (y1 + y2) / 2 },
     };
   }
@@ -164,23 +164,22 @@ export function edgeLabelPoints(from: Pos, to: Pos): {
     const x1 = from.x + NODE_W / 2, y1 = from.y;
     const x2 = to.x + NODE_W / 2,   y2 = to.y + NODE_H;
     return {
-      src: { x: x1, y: y1 - 7,  anchor: 'middle' },
-      dst: { x: x2, y: y2 + 13, anchor: 'middle' },
+      src: { x: x1, y: y1 - 4,  anchor: 'middle' },
+      dst: { x: x2, y: y2 + 10, anchor: 'middle' },
       mid: { x: (x1 + x2) / 2,  y: (y1 + y2) / 2 },
     };
   }
-  // horizontal — exits left/right side
-  const goRight = to.x >= from.x;
-  const x1 = goRight ? from.x + NODE_W : from.x;
+  // horizontal — exits left/right side; stack src above and dst below the VNI box
+  // to avoid all three labels colliding in the narrow H_GAP between nodes.
+  const x1 = (to.x >= from.x ? from.x + NODE_W : from.x);
   const y1 = from.y + NODE_H / 2;
-  const x2 = goRight ? to.x : to.x + NODE_W;
+  const x2 = (to.x >= from.x ? to.x : to.x + NODE_W);
   const y2 = to.y + NODE_H / 2;
   const midX = (x1 + x2) / 2;
   const midY = (y1 + y2) / 2;
-  const t = goRight ? 1 : -1;
   return {
-    src: { x: x1 + t * 10, y: midY - 16, anchor: 'middle' },
-    dst: { x: x2 - t * 10, y: midY - 16, anchor: 'middle' },
+    src: { x: midX, y: midY - 30, anchor: 'middle' },
+    dst: { x: midX, y: midY + 32, anchor: 'middle' },
     mid: { x: midX, y: midY },
   };
 }

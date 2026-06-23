@@ -151,38 +151,38 @@ export default function TopologyGraphSvg({
               <g pointerEvents="none">
                 {srcIp && (
                   <g>
-                    <rect x={lp.src.x - 52} y={lp.src.y - 10} width={104} height={14} rx="3"
+                    <rect x={lp.src.x - 50} y={lp.src.y - 9} width={100} height={11} rx="2"
                       fill="rgba(3,5,8,.82)" stroke="rgba(255,255,255,.08)" />
-                    <text x={lp.src.x} y={lp.src.y} textAnchor={lp.src.anchor}
-                      fill="rgba(255,255,255,.75)" fontSize="8" fontFamily="'JetBrains Mono',monospace">
+                    <text x={lp.src.x} y={lp.src.y} textAnchor="middle"
+                      fill="rgba(255,255,255,.75)" fontSize="7.5" fontFamily="'JetBrains Mono',monospace">
                       <tspan fill="rgba(255,255,255,.35)">src  </tspan>{srcIp}
                     </text>
                   </g>
                 )}
                 {dstIp && (
                   <g>
-                    <rect x={lp.dst.x - 52} y={lp.dst.y - 10} width={104} height={14} rx="3"
+                    <rect x={lp.dst.x - 50} y={lp.dst.y - 9} width={100} height={11} rx="2"
                       fill="rgba(3,5,8,.82)" stroke="rgba(255,255,255,.08)" />
-                    <text x={lp.dst.x} y={lp.dst.y} textAnchor={lp.dst.anchor}
-                      fill="rgba(255,255,255,.75)" fontSize="8" fontFamily="'JetBrains Mono',monospace">
+                    <text x={lp.dst.x} y={lp.dst.y} textAnchor="middle"
+                      fill="rgba(255,255,255,.75)" fontSize="7.5" fontFamily="'JetBrains Mono',monospace">
                       <tspan fill="rgba(255,255,255,.35)">dst  </tspan>{dstIp}
                     </text>
                   </g>
                 )}
                 {session && (
                   <g>
-                    <rect x={lp.mid.x - 67} y={lp.mid.y - 24} width={134} height={48} rx="5"
+                    <rect x={lp.mid.x - 60} y={lp.mid.y - 15} width={120} height={32} rx="4"
                       fill="rgba(3,5,8,.88)" stroke="rgba(255,255,255,.07)" />
-                    <text x={lp.mid.x} y={lp.mid.y - 11} textAnchor="middle"
-                      fill="rgba(91,156,246,.9)" fontSize="8.5" fontWeight="600">
+                    <text x={lp.mid.x} y={lp.mid.y - 6} textAnchor="middle"
+                      fill="rgba(91,156,246,.9)" fontSize="8" fontWeight="600">
                       VNI {session.network_id}
                     </text>
-                    <text x={lp.mid.x} y={lp.mid.y + 2} textAnchor="middle"
-                      fill="rgba(255,255,255,.5)" fontSize="7.5" fontFamily="'JetBrains Mono',monospace">
+                    <text x={lp.mid.x} y={lp.mid.y + 4} textAnchor="middle"
+                      fill="rgba(255,255,255,.5)" fontSize="7" fontFamily="'JetBrains Mono',monospace">
                       <tspan fill="rgba(255,255,255,.3)">src  </tspan>{session.client_net}
                     </text>
-                    <text x={lp.mid.x} y={lp.mid.y + 15} textAnchor="middle"
-                      fill="rgba(255,255,255,.5)" fontSize="7.5" fontFamily="'JetBrains Mono',monospace">
+                    <text x={lp.mid.x} y={lp.mid.y + 13} textAnchor="middle"
+                      fill="rgba(255,255,255,.5)" fontSize="7" fontFamily="'JetBrains Mono',monospace">
                       <tspan fill="rgba(255,255,255,.3)">dst  </tspan>{session.server_net}
                     </text>
                   </g>

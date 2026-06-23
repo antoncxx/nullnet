@@ -40,7 +40,10 @@ pub async fn serve(state: AppState) {
         .route("/api/config/{stack}", get(config::config_handler))
         .route("/api/graph/{stack}", get(graph::graph_handler))
         .route("/api/sessions/{stack}", get(sessions::list_handler))
-        .route("/api/sessions/{stack}/{id}", delete(sessions::teardown_handler))
+        .route(
+            "/api/sessions/{stack}/{id}",
+            delete(sessions::teardown_handler),
+        )
         .route("/api/chains/{stack}", get(chains::chains_handler))
         .route("/api/certificates", get(certificates::list_handler))
         .route(

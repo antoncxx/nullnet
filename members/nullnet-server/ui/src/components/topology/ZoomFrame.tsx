@@ -1,4 +1,4 @@
-import { useRef, useState, useCallback, useEffect } from 'react';
+import { useRef, useState, useCallback, useEffect, useLayoutEffect } from 'react';
 
 const MIN_SCALE = 0.2;
 const MAX_SCALE = 4;
@@ -18,6 +18,36 @@ export default function ZoomFrame({ height, children }: Props) {
   const [zoom, setZoom] = useState<ZoomState>({ scale: 1, tx: 0, ty: 0 });
   const dragging = useRef<{ startX: number; startY: number; startTx: number; startTy: number } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const homeZoom = useRef<ZoomState>({ scale: 1, tx: 0, ty: 0 });
+
+  // Compute centered initial position synchronously before first paint
+  useLayoutEffect(() => {
+    const container = containerRef.current;
+    const content = contentRef.current;
+    if (!container || !content) return;
+
+    const cw = container.clientWidth;
+    const ch = container.clientHeight;
+    const contentH = content.clientHeight;
+    if (!contentH) return;
+
+    let scale = 1;
+    let tx = 0;
+    let ty = 0;
+
+    if (contentH > ch) {
+      scale = (ch / contentH) * 0.9;
+      tx = (cw * (1 - scale)) / 2;
+      ty = (ch - contentH * scale) / 2;
+    } else {
+      ty = (ch - contentH) / 2;
+    }
+
+    const home: ZoomState = { scale, tx, ty };
+    homeZoom.current = home;
+    setZoom(home);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const el = containerRef.current;
@@ -54,9 +84,13 @@ export default function ZoomFrame({ height, children }: Props) {
 
   const stopDrag = useCallback(() => { dragging.current = null; }, []);
 
-  const resetZoom = useCallback(() => setZoom({ scale: 1, tx: 0, ty: 0 }), []);
+  const resetZoom = useCallback(() => setZoom(homeZoom.current), []);
 
-  const isDefault = zoom.scale === 1 && zoom.tx === 0 && zoom.ty === 0;
+  const h = homeZoom.current;
+  const isDefault =
+    Math.abs(zoom.scale - h.scale) < 0.001 &&
+    Math.abs(zoom.tx - h.tx) < 0.5 &&
+    Math.abs(zoom.ty - h.ty) < 0.5;
 
   return (
     <div style={{ position: 'relative' }}>
@@ -75,6 +109,7 @@ export default function ZoomFrame({ height, children }: Props) {
         onMouseLeave={stopDrag}
       >
         <div
+          ref={contentRef}
           style={{
             transform: `translate(${zoom.tx}px, ${zoom.ty}px) scale(${zoom.scale})`,
             transformOrigin: '0 0',

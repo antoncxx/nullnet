@@ -3,11 +3,13 @@ import Layout from '../components/Layout';
 import { useApi } from '../hooks/useApi';
 import { useStack } from '../StackContext';
 import type { NodeJson } from '../types';
+import { useDragResize } from '../hooks/useDragResize';
 
 export default function Nodes() {
   const { stack } = useStack();
   const { data: nodes, loading } = useApi<NodeJson[]>(`/api/nodes/${stack}`, 5000);
   const [selected, setSelected] = useState<string | null>(null);
+  const { width: dpWidth, onResizeStart } = useDragResize(300, 200, 560);
 
   const selectedNode = nodes?.find(n => n.ip === selected) ?? null;
 
@@ -76,7 +78,8 @@ export default function Nodes() {
           </div>
         </div>
 
-        <div className="dp">
+        <div className="dp" style={{ width: dpWidth }}>
+          <div className="drag-handle" onMouseDown={onResizeStart} />
           <div className="dp-head">
             <span className="dp-title">{selectedNode ? selectedNode.ip : '–'}</span>
             {selectedNode && (

@@ -6,6 +6,21 @@ use nullnet_grpc_lib::nullnet_grpc::{
 use nullnet_liberror::{ErrorHandler, Location, location};
 use std::net::{IpAddr, Ipv4Addr};
 
+/// Per-edge role for the egress forward-proxy feature. Only meaningful on the
+/// single edge of an egress edge (VXLAN only); ignored for VLAN.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum EgressRole {
+    /// Not an egress edge (backend/proxy edges).
+    #[default]
+    None,
+    /// Initiator (client) side: policy-route + SNAT external traffic into the
+    /// tunnel toward the proxy overlay IP, destination preserved (no DNAT).
+    Steer,
+    /// Gateway (server) side: forward tunnelled external packets to the internet
+    /// (kernel ip_forward + MASQUERADE), the Cilium egress-gateway model.
+    Intercept,
+}
+
 pub(crate) trait NetExt {
     #[allow(clippy::too_many_arguments)]
     fn setup(
@@ -17,6 +32,7 @@ pub(crate) trait NetExt {
         remote: IpAddr,
         docker_containers: (Option<String>, Option<String>),
         dnat_port: Option<u32>,
+        egress: EgressRole,
     ) -> Option<(Ipv4Addr, NetMessage)>;
 
     fn teardown(self, net_id: u32, side: &str, docker_container: Option<String>) -> NetMessage;
@@ -32,6 +48,7 @@ impl NetExt for Net {
         remote: IpAddr,
         docker_containers: (Option<String>, Option<String>),
         dnat_port: Option<u32>,
+        egress: EgressRole,
     ) -> Option<(Ipv4Addr, NetMessage)> {
         match self {
             Net::Vlan => vlan_setup(msg_id, dest, remote_server_name, net_id, remote),
@@ -43,6 +60,7 @@ impl NetExt for Net {
                 remote,
                 docker_containers,
                 dnat_port,
+                egress,
             ),
         }
     }
@@ -111,6 +129,7 @@ fn vlan_setup(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn vxlan_setup(
     msg_id: String,
     dest: IpAddr,
@@ -119,6 +138,7 @@ fn vxlan_setup(
     remote: IpAddr,
     docker_containers: (Option<String>, Option<String>),
     dnat_port: Option<u32>,
+    egress: EgressRole,
 ) -> Option<(Ipv4Addr, NetMessage)> {
     // Map vxlan_id to a /29 block within 10.0.0.0/8.
     // Each ID gets 8 IPs (6 usable), with 4 IPs used for ns/br server/client.
@@ -161,6 +181,14 @@ fn vxlan_setup(
         name,
     });
 
+    // Egress markers: Steer on the initiator (client) edge, Intercept on the
+    // proxy (server) edge. Mutually exclusive; both None for non-egress edges.
+    let (egress_steer, egress_intercept) = match egress {
+        EgressRole::None => (None, None),
+        EgressRole::Steer => (Some(true), None),
+        EgressRole::Intercept => (None, Some(true)),
+    };
+
     Some((
         server_net_ip,
         NetMessage {
@@ -176,6 +204,8 @@ fn vxlan_setup(
                 host_mapping,
                 docker_container,
                 dnat_port,
+                egress_steer,
+                egress_intercept,
             })),
         },
     ))

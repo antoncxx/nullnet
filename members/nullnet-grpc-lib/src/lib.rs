@@ -2,8 +2,8 @@ mod proto;
 
 use crate::nullnet_grpc::nullnet_grpc_client::NullnetGrpcClient;
 use crate::nullnet_grpc::{
-    AgentEvent, BackendTriggerRequest, CertBundle, Empty, MsgId, NetMessage, NetType, ProxyRequest,
-    Services, ServicesListResponse, Upstream,
+    AgentEvent, BackendTriggerRequest, CertBundle, EgressTriggerRequest, Empty, MsgId, NetMessage,
+    NetType, ProxyRequest, Services, ServicesListResponse, Upstream,
 };
 pub use proto::*;
 use tokio::sync::mpsc;
@@ -112,6 +112,30 @@ impl NullnetGrpcInterface {
                 service_name,
                 port,
                 initiator_container,
+            }))
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// Fire an egress trigger: the sending host observed a registered service
+    /// initiating a flow to an external destination. The server builds (or
+    /// reuses) a per-initiator egress edge to the proxy.
+    #[allow(clippy::missing_errors_doc)]
+    pub async fn egress_trigger(
+        &self,
+        service_name: String,
+        initiator_container: String,
+        dst_ip: String,
+        dst_port: u32,
+    ) -> Result<(), String> {
+        self.client
+            .clone()
+            .egress_trigger(Request::new(EgressTriggerRequest {
+                service_name,
+                initiator_container,
+                dst_ip,
+                dst_port,
             }))
             .await
             .map(|_| ())

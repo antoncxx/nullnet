@@ -1,6 +1,6 @@
 use crate::env::NET_TYPE;
 use crate::events::{Event, EventStore};
-use crate::net::NetExt;
+use crate::net::{EgressRole, NetExt};
 use crate::net_id_pool::NetIdPool;
 use crate::services::changes::{apply_changes, detect_node_disconnect_changes};
 use crate::services::input::StackMap;
@@ -18,11 +18,27 @@ use uuid::Uuid;
 
 type OutboundStream = mpsc::Sender<Result<NetMessage, Status>>;
 
+/// Initiator replica identity keying an egress edge: (node IP, docker container).
+/// One edge per initiator replica multiplexes all of its external destinations.
+type EgressKey = (IpAddr, Option<String>);
+
+/// A live egress forward-proxy edge (initiator replica -> proxy host).
+#[derive(Debug, Clone)]
+struct EgressEdge {
+    net_id: u32,
+    initiator_ip: IpAddr,
+    initiator_docker: Option<String>,
+    proxy_ip: IpAddr,
+}
+
 #[derive(Debug, Clone)]
 pub struct Orchestrator {
     clients: Arc<RwLock<HashMap<IpAddr, OutboundStream>>>,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
     net_id_pool: Arc<Mutex<NetIdPool>>,
+    /// Live egress edges, keyed by initiator replica. Separate from the service
+    /// StackMap because the proxy end is infrastructure, not a registered service.
+    egress_edges: Arc<RwLock<HashMap<EgressKey, EgressEdge>>>,
     pub(crate) events: EventStore,
 }
 
@@ -32,6 +48,7 @@ impl Orchestrator {
             clients: Arc::new(RwLock::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
             net_id_pool: Arc::new(Mutex::new(NetIdPool::new())),
+            egress_edges: Arc::new(RwLock::new(HashMap::new())),
             events: EventStore::new(),
         }
     }
@@ -97,8 +114,113 @@ impl Orchestrator {
             let changes = detect_node_disconnect_changes(stack_map, client_ip);
             apply_changes(changes, stack_map, None, self, &stack).await;
         }
+        drop(services_guard);
+
+        // Tear down egress edges anchored on the disconnected node, whether it
+        // was an initiator or the proxy itself.
+        self.teardown_egress_edges_for_node(client_ip).await;
     }
 
+    /// Ensure a single egress edge exists from `(initiator_ip, initiator_docker)`
+    /// to the proxy. Returns `Ok(true)` if a new edge was built, `Ok(false)` if
+    /// one already exists (idempotent — one edge per initiator replica serves all
+    /// external destinations). Race-safe: the slot is reserved under the write
+    /// lock before the async NET setup, so concurrent triggers collapse to one.
+    pub(crate) async fn ensure_egress_edge(
+        &self,
+        initiator_ip: IpAddr,
+        initiator_docker: Option<String>,
+        proxy_ip: IpAddr,
+    ) -> Result<bool, Error> {
+        let key = (initiator_ip, initiator_docker.clone());
+
+        // Reserve the slot (net_id filled in after allocation).
+        {
+            let mut edges = self.egress_edges.write().await;
+            if edges.contains_key(&key) {
+                return Ok(false);
+            }
+            edges.insert(
+                key.clone(),
+                EgressEdge {
+                    net_id: 0,
+                    initiator_ip,
+                    initiator_docker: initiator_docker.clone(),
+                    proxy_ip,
+                },
+            );
+        }
+
+        let Some(net_id) = self.allocate_net_id().await else {
+            self.egress_edges.write().await.remove(&key);
+            return Err("NET ID pool exhausted").handle_err(location!());
+        };
+
+        // Gateway is the server side (Intercept -> forward/MASQUERADE); initiator
+        // is the client side (Steer -> policy-route + SNAT). docker tuple is (client, server).
+        let dockers = (initiator_docker.clone(), None);
+        let proxy_res = self.send_net_setup(
+            proxy_ip,
+            None,
+            net_id,
+            initiator_ip,
+            dockers.clone(),
+            None,
+            EgressRole::Intercept,
+        );
+        let init_res = self.send_net_setup(
+            initiator_ip,
+            Some("nullnet-egress".to_string()),
+            net_id,
+            proxy_ip,
+            dockers,
+            None,
+            EgressRole::Steer,
+        );
+        let (proxy_ok, init_ok) = tokio::join!(proxy_res, init_res);
+
+        if proxy_ok.is_none() || init_ok.is_none() {
+            self.send_net_teardown(initiator_ip, initiator_docker, proxy_ip, None, net_id)
+                .await;
+            self.egress_edges.write().await.remove(&key);
+            return Err("egress edge NET setup failed").handle_err(location!());
+        }
+
+        // Promote the reservation to a live edge with its allocated net_id.
+        if let Some(edge) = self.egress_edges.write().await.get_mut(&key) {
+            edge.net_id = net_id;
+        }
+        Ok(true)
+    }
+
+    /// Tear down every egress edge anchored on `node_ip` (as initiator or proxy).
+    async fn teardown_egress_edges_for_node(&self, node_ip: IpAddr) {
+        let removed: Vec<EgressEdge> = {
+            let mut edges = self.egress_edges.write().await;
+            let keys: Vec<EgressKey> = edges
+                .iter()
+                .filter(|(_, e)| e.initiator_ip == node_ip || e.proxy_ip == node_ip)
+                .map(|(k, _)| k.clone())
+                .collect();
+            keys.into_iter().filter_map(|k| edges.remove(&k)).collect()
+        };
+        for e in removed {
+            // Skip reservations that never completed (net_id still 0).
+            if e.net_id == 0 {
+                continue;
+            }
+            self.send_net_teardown(
+                e.initiator_ip,
+                e.initiator_docker,
+                e.proxy_ip,
+                None,
+                e.net_id,
+            )
+            .await;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn send_net_setup(
         &self,
         dest: IpAddr,
@@ -107,6 +229,7 @@ impl Orchestrator {
         remote: IpAddr,
         docker_containers: (Option<String>, Option<String>),
         dnat_port: Option<u32>,
+        egress: EgressRole,
     ) -> Option<Ipv4Addr> {
         let outbound = self.clients.read().await.get(&dest).cloned();
         if let Some(outbound) = outbound {
@@ -122,6 +245,7 @@ impl Orchestrator {
                 remote,
                 docker_containers,
                 dnat_port,
+                egress,
             )?;
 
             if outbound.send(Ok(message)).await.is_err() {

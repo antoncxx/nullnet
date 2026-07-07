@@ -31,6 +31,7 @@ mod cli;
 mod commands;
 mod control_channel;
 mod ebpf;
+mod egress_state;
 mod env;
 mod forward;
 mod host_mappings;
@@ -113,6 +114,9 @@ async fn main() -> Result<(), Error> {
     // remember /etc/hosts entries installed at setup so teardown can undo them
     let host_mappings_state = Arc::new(HostMappingsState::default());
 
+    // remember egress plumbing installed at setup so teardown can reverse it
+    let egress_state = Arc::new(egress_state::EgressState::default());
+
     // listen on the gRPC control channel
     tokio::spawn(async move {
         if let Err(e) = control_channel(
@@ -122,6 +126,7 @@ async fn main() -> Result<(), Error> {
             triggers_state_cc,
             host_mappings_state,
             firewall_peers,
+            egress_state,
         )
         .await
         {
@@ -201,8 +206,20 @@ async fn setup_ebpf_firewall(rtnetlink_handle: &RtNetLinkHandle) -> Result<ebpf:
         .handle_err(location!())?;
 
     let control_port = *CONTROL_SERVICE_PORT;
-    println!("Attaching eBPF firewall to {iface} (allow control plane {server_ip}:{control_port})");
-    ebpf::enable(&iface, server_ip, control_port)
+    let egress_gateway = *crate::env::EGRESS_GATEWAY;
+    let listen_ports = crate::env::INGRESS_ALLOW_PORTS.clone();
+    if egress_gateway {
+        println!(
+            "Attaching eBPF firewall to {iface} in EGRESS-GATEWAY mode (stateful boundary: \
+             outbound allowed + tracked, inbound = established + 80/443 + {listen_ports:?})"
+        );
+    } else {
+        println!(
+            "Attaching eBPF firewall to {iface} (stateful strict; control plane \
+             {server_ip}:{control_port}, inbound listeners {listen_ports:?})"
+        );
+    }
+    ebpf::enable(&iface, server_ip, control_port, egress_gateway, &listen_ports)
 }
 
 /// Resolve `CONTROL_SERVICE_ADDR:CONTROL_SERVICE_PORT` to its first IPv4.

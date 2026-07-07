@@ -192,6 +192,18 @@ pub(crate) enum Event {
         error_message: String,
         timestamp: u64,
     },
+    EgressTriggerSendFailed {
+        service_name: String,
+        dst_ip: String,
+        dst_port: u32,
+        error_message: String,
+        timestamp: u64,
+    },
+    GatewayForwardInstallFailed {
+        vxlan_id: u32,
+        br_net: String,
+        timestamp: u64,
+    },
     FirewallRulesLoadFailed {
         path: String,
         error_message: String,
@@ -313,6 +325,8 @@ impl Event {
             Self::ControlChannelAckFailed { .. } => "control_channel_ack_failed",
             Self::ServicesListUpdateFailed { .. } => "services_list_update_failed",
             Self::BackendTriggerSendFailed { .. } => "backend_trigger_send_failed",
+            Self::EgressTriggerSendFailed { .. } => "egress_trigger_send_failed",
+            Self::GatewayForwardInstallFailed { .. } => "gateway_forward_install_failed",
             Self::FirewallRulesLoadFailed { .. } => "firewall_rules_load_failed",
             Self::ContainerSuspendFailed { .. } => "container_suspend_failed",
             Self::ContainerResumeFailed { .. } => "container_resume_failed",
@@ -375,6 +389,8 @@ impl Event {
             | Self::ControlChannelAckFailed { .. }
             | Self::ServicesListUpdateFailed { .. }
             | Self::BackendTriggerSendFailed { .. }
+            | Self::EgressTriggerSendFailed { .. }
+            | Self::GatewayForwardInstallFailed { .. }
             | Self::FirewallRulesLoadFailed { .. }
             | Self::ContainerSuspendFailed { .. }
             | Self::ContainerResumeFailed { .. }
@@ -656,6 +672,29 @@ impl Event {
             service_name,
             port,
             error_message,
+            timestamp: now_secs(),
+        }
+    }
+
+    pub(crate) fn egress_trigger_send_failed(
+        service_name: String,
+        dst_ip: String,
+        dst_port: u32,
+        error_message: String,
+    ) -> Self {
+        Self::EgressTriggerSendFailed {
+            service_name,
+            dst_ip,
+            dst_port,
+            error_message,
+            timestamp: now_secs(),
+        }
+    }
+
+    pub(crate) fn gateway_forward_install_failed(vxlan_id: u32, br_net: String) -> Self {
+        Self::GatewayForwardInstallFailed {
+            vxlan_id,
+            br_net,
             timestamp: now_secs(),
         }
     }

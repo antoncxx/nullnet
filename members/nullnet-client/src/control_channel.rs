@@ -1,5 +1,6 @@
-use crate::commands::{RtNetLinkHandle, configure_access_port, dnat, remove_vlan};
+use crate::commands::{RtNetLinkHandle, configure_access_port, dnat, egress, remove_vlan};
 use crate::ebpf::{FirewallPeers, NetId};
+use crate::egress_state::{EgressRecord, EgressState};
 use crate::host_mappings::HostMappingsState;
 use crate::peers::peer::{Peers, VethKey};
 use crate::triggers::TriggersState;
@@ -8,7 +9,8 @@ use nullnet_grpc_lib::NullnetGrpcInterface;
 use nullnet_grpc_lib::nullnet_grpc::{
     AgentContainerResumeFailed, AgentContainerSuspendFailed, AgentControlChannelAckFailed,
     AgentControlChannelClosed, AgentControlChannelEstablished, AgentDnatInstallFailed,
-    AgentDnatRemovalFailed, AgentHostMappingFailed, AgentVlanSetupCompleted, AgentVlanSetupFailed,
+    AgentDnatRemovalFailed, AgentGatewayForwardInstallFailed, AgentHostMappingFailed,
+    AgentVlanSetupCompleted, AgentVlanSetupFailed,
     AgentVlanTeardownFailed, AgentVxlanSetupCompleted, AgentVxlanSetupFailed,
     AgentVxlanTeardownFailed,
 };
@@ -38,6 +40,7 @@ pub(crate) async fn control_channel(
     triggers_state: Arc<TriggersState>,
     host_mappings_state: Arc<HostMappingsState>,
     firewall_peers: Arc<FirewallPeers>,
+    egress_state: Arc<EgressState>,
 ) -> Result<(), Error> {
     let (outbound, grpc_rx) = mpsc::channel(64);
     let mut inbound = server
@@ -87,6 +90,7 @@ pub(crate) async fn control_channel(
             }
             Some(net_message::Message::VxlanSetup(vxlan_setup)) => {
                 let triggers_state = triggers_state.clone();
+                let egress_state = egress_state.clone();
                 tokio::spawn(async move {
                     let _ = handle_vxlan_setup(
                         vxlan_setup,
@@ -95,12 +99,14 @@ pub(crate) async fn control_channel(
                         host_mappings_state,
                         server,
                         firewall_peers,
+                        egress_state,
                     )
                     .await;
                 });
             }
             Some(net_message::Message::VxlanTeardown(vxlan_teardown)) => {
                 let triggers_state = triggers_state.clone();
+                let egress_state = egress_state.clone();
                 tokio::spawn(async move {
                     handle_vxlan_teardown(
                         vxlan_teardown,
@@ -108,6 +114,7 @@ pub(crate) async fn control_channel(
                         host_mappings_state,
                         server,
                         firewall_peers,
+                        egress_state,
                     );
                 });
             }
@@ -273,6 +280,7 @@ async fn handle_vlan_teardown(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_vxlan_setup(
     message: VxlanSetup,
     outbound: Sender<MsgId>,
@@ -280,7 +288,10 @@ async fn handle_vxlan_setup(
     host_mappings_state: Arc<HostMappingsState>,
     grpc: NullnetGrpcInterface,
     firewall_peers: Arc<FirewallPeers>,
+    egress_state: Arc<EgressState>,
 ) -> Result<(), Error> {
+    let egress_steer = message.egress_steer.unwrap_or(false);
+    let egress_intercept = message.egress_intercept.unwrap_or(false);
     let msg_id = &message
         .msg_id
         .ok_or("Missing message ID in VXLAN setup message")
@@ -315,11 +326,17 @@ async fn handle_vxlan_setup(
     cmd.arg(vxlan_id.to_string())
         .arg(&ns_name)
         .arg(ns_net.to_string())
-        .arg(br_name)
+        .arg(&br_name)
         .arg(br_net.to_string())
         .arg(local_ip.to_string())
         .arg(remote_ip.to_string());
-    if let Some(container) = &message.docker_container {
+    // Egress-steer edges keep their tunnel endpoint in the host root namespace
+    // (no `docker_container` arg) so the initiator container's *forwarded*
+    // external traffic can be policy-routed into the bridge. Other edges attach
+    // the endpoint to the container as before.
+    if !egress_steer
+        && let Some(container) = &message.docker_container
+    {
         cmd.arg(container);
     }
     let script_result = cmd.spawn().and_then(|mut c| c.wait());
@@ -345,8 +362,60 @@ async fn handle_vxlan_setup(
         message.docker_container.as_deref().unwrap_or("none"),
     );
 
-    // add host mapping if needed
-    if let Some(host_mapping) = &message.host_mapping {
+    // Egress edges install steering (initiator) or interception (proxy) instead
+    // of the host-mapping + DNAT path used by proxy/backend edges.
+    if egress_steer {
+        // Proxy overlay IP (gateway) is carried in host_mapping.ip; our own
+        // overlay bridge IP is the SNAT source; the container IP scopes the
+        // source-based routing.
+        let proxy_gw = message
+            .host_mapping
+            .as_ref()
+            .and_then(|hm| hm.ip.parse::<Ipv4Addr>().ok());
+        let snat_src = br_net.ip();
+        let container_ip = message
+            .docker_container
+            .as_deref()
+            .and_then(egress::container_ipv4);
+        match (proxy_gw, container_ip) {
+            (Some(gw), Some(cip)) => {
+                if egress::install_steer(vxlan_id, &br_name, gw, snat_src, cip) {
+                    egress_state.record(
+                        vxlan_id,
+                        EgressRecord::Steer {
+                            br_name: br_name.clone(),
+                            snat_src,
+                            container_ip: cip,
+                        },
+                    );
+                }
+            }
+            _ => {
+                eprintln!(
+                    "[vxlan_setup] egress steer missing gateway/container_ip \
+                     (gw={proxy_gw:?}, cip={container_ip:?}); steering not installed"
+                );
+            }
+        }
+    } else if egress_intercept {
+        if egress::install_gateway_forward(&br_name, &message.br_net) {
+            egress_state.record(
+                vxlan_id,
+                EgressRecord::Gateway {
+                    br_name: br_name.clone(),
+                    br_net: message.br_net.clone(),
+                },
+            );
+        } else {
+            fire_event(
+                &grpc,
+                AgentEventKind::GatewayForwardInstallFailed(AgentGatewayForwardInstallFailed {
+                    vxlan_id,
+                    br_net: message.br_net.clone(),
+                }),
+            );
+        }
+    } else if let Some(host_mapping) = &message.host_mapping {
         if add_host_mapping(host_mapping, message.docker_container.as_deref()).is_err() {
             fire_event(
                 &grpc,
@@ -450,7 +519,22 @@ fn handle_vxlan_teardown(
     host_mappings_state: Arc<HostMappingsState>,
     grpc: NullnetGrpcInterface,
     firewall_peers: Arc<FirewallPeers>,
+    egress_state: Arc<EgressState>,
 ) {
+    // reverse egress steering/interception if this was an egress edge
+    if let Some(rec) = egress_state.take(message.vxlan_id) {
+        match rec {
+            EgressRecord::Steer {
+                br_name,
+                snat_src,
+                container_ip,
+            } => egress::remove_steer(message.vxlan_id, &br_name, snat_src, container_ip),
+            EgressRecord::Gateway { br_name, br_net } => {
+                egress::remove_gateway_forward(&br_name, &br_net)
+            }
+        }
+    }
+
     // drop this peer's firewall allowance (refcounted; only removed if unused)
     firewall_peers.remove(NetId::Vxlan(message.vxlan_id));
 

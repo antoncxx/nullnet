@@ -1,15 +1,16 @@
-//! Host-NIC eBPF default-deny firewall (strict nullnet-only mode).
+//! Host-NIC eBPF default-deny firewall (stateful).
 //!
-//! Loads the `nullnet_firewall` TC classifier and attaches it to ingress +
-//! egress on the host's primary interface. Only nullnet control-plane (gRPC to
-//! the server) and data-plane (VXLAN/forward to known peers) traffic is
-//! allowed; everything else on that NIC is dropped. ARP is always allowed
-//! (required for next-hop resolution). Peers are added/removed from the `PEERS`
-//! map by the control channel as VXLAN/VLAN edges come and go.
+//! Loads the `nullnet_fw_ingress` / `nullnet_fw_egress` TC classifiers and
+//! attaches them to the ingress and egress hooks of the host's primary
+//! interface. Base allow is nullnet control-plane (gRPC) + data-plane
+//! (VXLAN/forward to known peers) + ARP; a CT map then permits established
+//! returns. On the egress-gateway host all outbound is allowed and tracked while
+//! inbound is restricted to established + LISTEN_PORTS (+ 80/443). Peers are
+//! added/removed from the `PEERS` map by the control channel as edges come and go.
 //!
-//! Loading mirrors the previous aya-based loader: raise the memlock rlimit,
-//! `EbpfLoader` with `set_global`, ensure a clsact qdisc, then load+attach the
-//! `SchedClassifier`.
+//! Loading: raise the memlock rlimit, `EbpfLoader` with `set_global`, ensure a
+//! clsact qdisc, load+attach each `SchedClassifier` to its hook, then populate
+//! LISTEN_PORTS.
 
 use aya::Ebpf;
 use aya::maps::{HashMap as AyaHashMap, MapData};
@@ -18,7 +19,8 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
 
-const PROGRAM_NAME: &str = "nullnet_firewall";
+const INGRESS_PROG: &str = "nullnet_fw_ingress";
+const EGRESS_PROG: &str = "nullnet_fw_egress";
 
 /// Identifies the edge a peer allowlist entry belongs to, so a teardown (which
 /// carries only the net id, not the remote IP) can decrement the right peer.
@@ -108,18 +110,26 @@ impl FirewallPeers {
     }
 }
 
-pub fn enable(iface: &str, server_ip: Ipv4Addr, control_port: u16) -> Result<Firewall, Error> {
+pub fn enable(
+    iface: &str,
+    server_ip: Ipv4Addr,
+    control_port: u16,
+    egress_gateway: bool,
+    listen_ports: &[u16],
+) -> Result<Firewall, Error> {
     use aya::EbpfLoader;
-    use aya::programs::{SchedClassifier, TcAttachType, tc};
+    use aya::programs::{TcAttachType, tc};
 
     raise_memlock_rlimit();
 
     // Bind the globals to locals: `set_global` holds a borrow until `load()`,
     // so a temporary (e.g. `&u32::from(..)`) would dangle.
     let server_ip_be = u32::from(server_ip);
+    let gateway_u8: u8 = u8::from(egress_gateway);
     let mut loader = EbpfLoader::new();
     loader.set_global("SERVER_IP", &server_ip_be, true);
     loader.set_global("CONTROL_PORT", &control_port, true);
+    loader.set_global("EGRESS_GATEWAY", &gateway_u8, true);
     let mut bpf = loader
         .load(aya::include_bytes_aligned!(env!(
             "NULLNET_BIN_PATH",
@@ -133,24 +143,13 @@ pub fn enable(iface: &str, server_ip: Ipv4Addr, control_port: u16) -> Result<Fir
         Err(e) => println!("[ebpf] clsact qdisc add returned: {e} (ok if already present)"),
     }
 
-    let program: &mut SchedClassifier = bpf
-        .program_mut(PROGRAM_NAME)
-        .ok_or("nullnet_firewall program not found in bytecode")
-        .handle_err(location!())?
-        .try_into()
-        .handle_err(location!())?;
-    program.load().handle_err(location!())?;
+    // Direction-specific programs sharing the PEERS/LISTEN_PORTS/CT maps: the
+    // ingress classifier enforces inbound, the egress one outbound.
+    attach_classifier(&mut bpf, INGRESS_PROG, iface, TcAttachType::Ingress)?;
+    attach_classifier(&mut bpf, EGRESS_PROG, iface, TcAttachType::Egress)?;
+    println!("[ebpf] nullnet firewall attached to {iface} (stateful; gateway={egress_gateway})");
 
-    // Same program enforces both directions; the filter logic is symmetric
-    // (matches on src or dst), so a single load attached twice suffices and
-    // keeps one shared PEERS map.
-    program
-        .attach(iface, TcAttachType::Ingress)
-        .handle_err(location!())?;
-    program
-        .attach(iface, TcAttachType::Egress)
-        .handle_err(location!())?;
-    println!("[ebpf] nullnet_firewall attached to {iface} (ingress + egress)");
+    populate_listen_ports(&mut bpf, egress_gateway, listen_ports)?;
 
     let peers_map: AyaHashMap<MapData, u32, u8> = bpf
         .take_map("PEERS")
@@ -163,6 +162,47 @@ pub fn enable(iface: &str, server_ip: Ipv4Addr, control_port: u16) -> Result<Fir
         bpf,
         peers: Arc::new(FirewallPeers::new(peers_map)),
     })
+}
+
+/// Load one classifier program and attach it to the given TC hook on `iface`.
+fn attach_classifier(
+    bpf: &mut Ebpf,
+    name: &str,
+    iface: &str,
+    hook: aya::programs::TcAttachType,
+) -> Result<(), Error> {
+    use aya::programs::SchedClassifier;
+    let program: &mut SchedClassifier = bpf
+        .program_mut(name)
+        .ok_or("firewall program not found in bytecode")
+        .handle_err(location!())?
+        .try_into()
+        .handle_err(location!())?;
+    program.load().handle_err(location!())?;
+    program.attach(iface, hook).handle_err(location!())?;
+    Ok(())
+}
+
+/// Fill the LISTEN_PORTS map with the unsolicited-inbound TCP ports the stateful
+/// firewall accepts. The gateway implicitly serves the reverse proxy on 80/443;
+/// `extra` (from `INGRESS_ALLOW_PORTS`) adds SSH/dashboard/etc. The map is taken
+/// only to populate it; the attached programs keep it alive kernel-side.
+fn populate_listen_ports(bpf: &mut Ebpf, gateway: bool, extra: &[u16]) -> Result<(), Error> {
+    let mut map: AyaHashMap<MapData, u16, u8> = bpf
+        .take_map("LISTEN_PORTS")
+        .ok_or("LISTEN_PORTS map not found in bytecode")
+        .handle_err(location!())?
+        .try_into()
+        .handle_err(location!())?;
+    if gateway {
+        for p in [80u16, 443] {
+            let _ = map.insert(p, 0u8, 0);
+        }
+    }
+    for &p in extra {
+        let _ = map.insert(p, 0u8, 0);
+    }
+    Ok(())
 }
 
 fn raise_memlock_rlimit() {

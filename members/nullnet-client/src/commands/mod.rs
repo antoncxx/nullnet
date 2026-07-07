@@ -6,6 +6,7 @@ use rtnetlink::{Handle, new_connection};
 use std::net::Ipv4Addr;
 
 pub(crate) mod dnat;
+pub(crate) mod egress;
 mod netlink;
 pub(crate) mod nfqueue;
 mod ovs;
@@ -104,6 +105,7 @@ impl RtNetLinkHandle {
 pub(crate) async fn cleanup_network(rtnetlink_handle: &RtNetLinkHandle) {
     dnat::init();
     nfqueue::init();
+    egress::init();
     install_mss_clamp();
     vxlan_cleanup_network();
     vlan_cleanup_network(rtnetlink_handle).await;

@@ -33,6 +33,7 @@ impl Edge {
                 client_docker: self.client_docker,
                 server_docker: self.server_docker,
                 backend_entry_port: None,
+                egress: false,
             })
         } else {
             None
@@ -50,6 +51,10 @@ pub(crate) struct RegisteredEdge {
     /// echoed in the client-side `VxlanSetup.dnat_port` so the receiver can
     /// install DNAT(port -> `overlay_ip`).
     pub(crate) backend_entry_port: Option<u32>,
+    /// `true` iff this is an egress forward-proxy edge (initiator service ->
+    /// proxy). Drives the `egress_steer`/`egress_intercept` markers on the two
+    /// `VxlanSetup` messages instead of DNAT.
+    pub(crate) egress: bool,
 }
 
 impl RegisteredEdge {
@@ -67,6 +72,7 @@ impl RegisteredEdge {
             client_docker,
             server_docker,
             backend_entry_port: None,
+            egress: false,
         }
     }
 }

@@ -1,6 +1,7 @@
-use crate::env::NET_TYPE;
+use crate::env::{NET_TYPE, PROXY_IP};
 use crate::events::Event;
 use crate::graphviz::generate_graphviz;
+use crate::net::EgressRole;
 use crate::orchestrator::Orchestrator;
 use crate::services::changes::{
     apply_changes, collect_dep_chain_edges, detect_services_list_changes,
@@ -12,8 +13,9 @@ use crate::services::service_info::{ServiceInfo, backend_involved_services};
 use crate::timeout::check_timeouts;
 use nullnet_grpc_lib::nullnet_grpc::nullnet_grpc_server::NullnetGrpc;
 use nullnet_grpc_lib::nullnet_grpc::{
-    AgentEvent, BackendTriggerRequest, CertBundle, Empty, MsgId, NetMessage, NetType, ProxyRequest,
-    ServiceTrigger, Services, ServicesListResponse, Upstream, agent_event::Event as AgentEventKind,
+    AgentEvent, BackendTriggerRequest, CertBundle, Empty, EgressTriggerRequest, MsgId, NetMessage,
+    NetType, ProxyRequest, ServiceTrigger, Services, ServicesListResponse, Upstream,
+    agent_event::Event as AgentEventKind,
 };
 use nullnet_liberror::{Error, ErrorHandler, Location, location};
 use std::collections::{HashMap, HashSet};
@@ -619,6 +621,83 @@ impl NullnetGrpcImpl {
         Ok(())
     }
 
+    async fn egress_trigger_impl(
+        &self,
+        request: Request<EgressTriggerRequest>,
+    ) -> Result<Response<Empty>, Error> {
+        let sender_ip = request
+            .remote_addr()
+            .ok_or("Could not get remote address for egress trigger")
+            .handle_err(location!())?
+            .ip();
+
+        let req = request.into_inner();
+        let container = if req.initiator_container.is_empty() {
+            None
+        } else {
+            Some(req.initiator_container)
+        };
+        self.handle_egress_trigger(sender_ip, container.as_deref())
+            .await?;
+        Ok(Response::new(Empty {}))
+    }
+
+    pub(crate) async fn handle_egress_trigger(
+        &self,
+        sender_ip: IpAddr,
+        initiator_container: Option<&str>,
+    ) -> Result<(), Error> {
+        println!(
+            "Received egress trigger from {sender_ip} (container: {})",
+            initiator_container.unwrap_or("<none>"),
+        );
+
+        let Some(proxy_ip) = *PROXY_IP else {
+            Err("PROXY_IP is not configured; egress brokering is disabled")
+                .handle_err(location!())?
+        };
+
+        // Resolve the initiator to a *registered* replica by (ip, container),
+        // scanning every stack — the client doesn't send a logical service name.
+        // A match also enforces that only registered services get egress.
+        let resolved = {
+            let guard = self.services.read().await;
+            let mut found: Option<(String, IpAddr, Option<String>)> = None;
+            'outer: for stack_map in guard.values() {
+                for (name, si) in stack_map.iter() {
+                    let ServiceInfo::Registered(reg) = si else {
+                        continue;
+                    };
+                    let replica = reg.replicas().iter().find(|r| {
+                        r.ip() == sender_ip
+                            && match initiator_container {
+                                Some(c) => r.docker_container() == Some(c),
+                                None => true,
+                            }
+                    });
+                    if let Some(r) = replica {
+                        found = Some((name.clone(), r.ip(), r.docker_container().map(String::from)));
+                        break 'outer;
+                    }
+                }
+            }
+            found
+        };
+
+        let Some((initiator_name, initiator_ip, initiator_docker)) = resolved else {
+            Err("No registered replica matches the egress sender").handle_err(location!())?
+        };
+
+        let built = self
+            .orchestrator
+            .ensure_egress_edge(initiator_ip, initiator_docker, proxy_ip)
+            .await?;
+        if built {
+            println!("[egress] edge up for '{initiator_name}' ({initiator_ip}) -> proxy {proxy_ip}");
+        }
+        Ok(())
+    }
+
     pub(crate) fn services(&self) -> &Arc<RwLock<StackMap>> {
         &self.services
     }
@@ -703,6 +782,13 @@ impl NullnetGrpcImpl {
             let client_docker = edge.client_docker;
             let server_docker = edge.server_docker;
             let backend_entry_port = edge.backend_entry_port;
+            // Egress edges steer on the initiator (client) side and intercept on
+            // the proxy (server) side; non-egress edges pass EgressRole::None.
+            let (server_egress, client_egress) = if edge.egress {
+                (EgressRole::Intercept, EgressRole::Steer)
+            } else {
+                (EgressRole::None, EgressRole::None)
+            };
 
             let services = self.services.clone();
             let orchestrator = self.orchestrator.clone();
@@ -820,6 +906,7 @@ impl NullnetGrpcImpl {
                     client_ethernet,
                     (cd, sd),
                     None,
+                    server_egress,
                 );
                 let orch2 = orchestrator.clone();
                 let cd = client_docker.clone();
@@ -831,6 +918,7 @@ impl NullnetGrpcImpl {
                     server_ethernet,
                     (cd, sd),
                     backend_entry_port,
+                    client_egress,
                 );
 
                 let (server_ok, client_ok) = tokio::join!(server_res, client_res);
@@ -1076,6 +1164,15 @@ impl NullnetGrpc for NullnetGrpcImpl {
             .map_err(|err| Status::internal(err.to_str()))
     }
 
+    async fn egress_trigger(
+        &self,
+        req: Request<EgressTriggerRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        self.egress_trigger_impl(req)
+            .await
+            .map_err(|err| Status::internal(err.to_str()))
+    }
+
     type WatchCertificatesStream = ReceiverStream<Result<CertBundle, Status>>;
 
     async fn watch_certificates(
@@ -1135,6 +1232,17 @@ impl NullnetGrpc for NullnetGrpcImpl {
             }
             AgentEventKind::BackendTriggerSendFailed(e) => {
                 Event::backend_trigger_send_failed(e.service_name, e.port as u16, e.error_message)
+            }
+            AgentEventKind::EgressTriggerSendFailed(e) => {
+                Event::egress_trigger_send_failed(
+                    e.service_name,
+                    e.dst_ip,
+                    e.dst_port,
+                    e.error_message,
+                )
+            }
+            AgentEventKind::GatewayForwardInstallFailed(e) => {
+                Event::gateway_forward_install_failed(e.vxlan_id, e.br_net)
             }
             AgentEventKind::FirewallRulesLoadFailed(e) => {
                 Event::firewall_rules_load_failed(e.path, e.error_message)

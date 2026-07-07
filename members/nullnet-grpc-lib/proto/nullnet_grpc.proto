@@ -25,6 +25,10 @@ service NullnetGrpc {
   // Backend trigger — for service-to-service chains that do not involve the proxy.
   rpc BackendTrigger(BackendTriggerRequest) returns (Empty);
 
+  // Egress trigger — for a registered service reaching the external internet,
+  // brokered through the proxy's transparent forward listener.
+  rpc EgressTrigger(EgressTriggerRequest) returns (Empty);
+
   // Report an event from a client or proxy agent back to the server.
   rpc ReportEvent(AgentEvent) returns (Empty);
 
@@ -104,6 +108,14 @@ message VxlanSetup {
   // The receiving client installs DNAT(dnat_port -> overlay_ip) so the
   // initiator's traffic on that local port is steered into the new VXLAN.
   optional uint32 dnat_port = 11;
+  // Egress forward-proxy edge markers. Mutually exclusive with each other and
+  // with dnat_port. Set on the initiator's edge: install policy-route + SNAT so
+  // the service's external-bound traffic is steered into this VXLAN toward the
+  // proxy (remote_ip) with the original destination preserved (no DNAT).
+  optional bool egress_steer = 12;
+  // Set on the gateway's edge: forward tunnelled external-bound packets to the
+  // internet (kernel ip_forward + MASQUERADE); the Cilium egress-gateway model.
+  optional bool egress_intercept = 13;
 }
 
 message VxlanTeardown {
@@ -172,6 +184,21 @@ message BackendTriggerRequest {
   string initiator_container = 3;
 }
 
+// Egress trigger — fired by the client on the first NEW flow from a registered
+// service to an external (non-nullnet) destination. The server builds (or reuses)
+// a single per-host egress VXLAN edge to the proxy; the destination is preserved
+// in-band, so one edge serves all of that service's external destinations.
+message EgressTriggerRequest {
+  string service_name = 1;
+  // Real Docker container name of the initiator replica. Empty for a host
+  // process; disambiguates co-located replicas otherwise (as in BackendTrigger).
+  string initiator_container = 2;
+  // Observed external destination — for logging / future policy only; the edge
+  // itself is destination-agnostic.
+  string dst_ip = 3;
+  uint32 dst_port = 4;
+}
+
 // TLS certificates ----------------------------------------------------------------------------------------------------
 
 // A single TLS certificate, keyed by the SNI name it serves (exact, e.g.
@@ -214,6 +241,8 @@ message AgentEvent {
     AgentFirewallRulesLoadFailed  firewall_rules_load_failed  = 12;
     AgentContainerSuspendFailed   container_suspend_failed    = 24;
     AgentContainerResumeFailed    container_resume_failed     = 25;
+    AgentEgressTriggerSendFailed  egress_trigger_send_failed  = 26;
+    AgentGatewayForwardInstallFailed gateway_forward_install_failed = 28;
     // Client info events
     AgentVxlanSetupCompleted      vxlan_setup_completed      = 13;
     AgentVlanSetupCompleted       vlan_setup_completed       = 14;
@@ -245,6 +274,8 @@ message AgentBackendTriggerSendFailed { string service_name = 1; uint32 port = 2
 message AgentFirewallRulesLoadFailed  { string path = 1; string error_message = 2; }
 message AgentContainerSuspendFailed  { string docker_container = 1; string error_message = 2; }
 message AgentContainerResumeFailed   { string docker_container = 1; string error_message = 2; }
+message AgentEgressTriggerSendFailed { string service_name = 1; string dst_ip = 2; uint32 dst_port = 3; string error_message = 4; }
+message AgentGatewayForwardInstallFailed { uint32 vxlan_id = 1; string br_net = 2; }
 message AgentVxlanSetupCompleted    { uint32 vxlan_id = 1; string ns_name = 2; }
 message AgentVlanSetupCompleted     { uint32 vlan_id = 1; }
 message AgentControlChannelEstablished {}

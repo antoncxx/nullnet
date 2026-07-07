@@ -255,6 +255,10 @@ async fn main() -> Result<(), nullnet_liberror::Error> {
         tokio::spawn(async move { watch_certificates(server, store).await });
     }
 
+    // Egress is handled by the co-located nullnet-client's kernel forwarding
+    // (ip_forward + MASQUERADE, the Cilium egress-gateway model), not by a
+    // userspace forward proxy here. See docs/egress-gateway-cilium-model.md.
+
     // HTTP listener: redirects to HTTPS for hosts that have a cert
     let mut http_proxy =
         pingora_proxy::http_proxy_service(&my_server.configuration, nullnet_proxy.clone());

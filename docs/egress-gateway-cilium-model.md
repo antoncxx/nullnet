@@ -263,8 +263,11 @@ Until D lands, egress remains allow-all and the trigger stays on NFQUEUE.
 - Same-node case (proxy co-located with the service): the veth-pair overlay path
   from the old design still applies; confirm masquerade + forward behave under the
   `LOCAL_IP == REMOTE_IP` veth branch of `vxlan-setup.sh`.
-- Idle-TTL teardown: the CT map could carry per-flow timestamps (currently
-  presence-only) to provide the data-plane idleness signal the old design said was
-  missing — a follow-up sweep could use it.
+- Edge teardown: **node disconnect** reverses both sides; **container death /
+  dereg** (node still up) is now reaped via the per-node `services_list` (edges
+  whose initiator container is no longer running are torn down —
+  `teardown_egress_edges_for_missing_containers`). Still open: **idle-TTL** for an
+  edge whose container is alive but egress goes unused — the CT map could carry
+  per-flow timestamps (currently presence-only) as the data-plane idleness signal.
 - MTU: kernel VXLAN + masquerade path must respect the per-node MSS clamp
   (`nullnet_vxlan_mtu_blackhole`).

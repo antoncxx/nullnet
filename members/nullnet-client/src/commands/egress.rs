@@ -69,7 +69,13 @@ pub(crate) fn init() {
     sudo_ok(
         "ipset create internal",
         &[
-            "ipset", "create", "-exist", INTERNAL_SET, "hash:net", "family", "inet",
+            "ipset",
+            "create",
+            "-exist",
+            INTERNAL_SET,
+            "hash:net",
+            "family",
+            "inet",
         ],
     );
     sudo_ok("ipset flush internal", &["ipset", "flush", INTERNAL_SET]);
@@ -85,8 +91,24 @@ pub(crate) fn init() {
     // fails open if no listener is attached. Pre-delete for idempotency.
     for proto in ["tcp", "udp"] {
         let rule = [
-            "-t", "mangle", "-p", proto, "-m", "set", "!", "--match-set", INTERNAL_SET, "dst", "-m",
-            "conntrack", "--ctstate", "NEW", "-j", "NFQUEUE", "--queue-num", QUEUE_NUM,
+            "-t",
+            "mangle",
+            "-p",
+            proto,
+            "-m",
+            "set",
+            "!",
+            "--match-set",
+            INTERNAL_SET,
+            "dst",
+            "-m",
+            "conntrack",
+            "--ctstate",
+            "NEW",
+            "-j",
+            "NFQUEUE",
+            "--queue-num",
+            QUEUE_NUM,
             "--queue-bypass",
         ];
         let mut del = vec!["iptables", "-D", "PREROUTING"];
@@ -94,7 +116,10 @@ pub(crate) fn init() {
         let _ = sudo(&del);
         let mut add = vec!["iptables", "-A", "PREROUTING"];
         add.extend_from_slice(&rule);
-        sudo_ok(&format!("iptables -A PREROUTING egress NFQUEUE {proto}"), &add);
+        sudo_ok(
+            &format!("iptables -A PREROUTING egress NFQUEUE {proto}"),
+            &add,
+        );
     }
 
     // Gateway-side forwarding: enable IPv4 forwarding so decapsulated packets
@@ -143,8 +168,7 @@ pub(crate) fn install_steer(
         ok &= sudo_ok(
             "ip rule add internal bypass",
             &[
-                "ip", "rule", "add", "from", &cip, "to", range, "lookup", "main", "priority",
-                &prio,
+                "ip", "rule", "add", "from", &cip, "to", range, "lookup", "main", "priority", &prio,
             ],
         );
     }
@@ -193,7 +217,9 @@ pub(crate) fn install_steer(
         ],
     );
     if ok {
-        println!("[egress] steer net {net_id}: {cip} -> via {proxy_gw} dev {br_dev} (snat {snat_src})");
+        println!(
+            "[egress] steer net {net_id}: {cip} -> via {proxy_gw} dev {br_dev} (snat {snat_src})"
+        );
     }
     ok
 }
@@ -241,7 +267,16 @@ pub(crate) fn install_gateway_forward(br_dev: &str, br_net: &str) -> bool {
     ok &= sudo_ok(
         "iptables MASQUERADE gateway",
         &[
-            "iptables", "-t", "nat", "-A", "POSTROUTING", "-s", br_net, "-o", &nic, "-j",
+            "iptables",
+            "-t",
+            "nat",
+            "-A",
+            "POSTROUTING",
+            "-s",
+            br_net,
+            "-o",
+            &nic,
+            "-j",
             "MASQUERADE",
         ],
     );
@@ -249,13 +284,26 @@ pub(crate) fn install_gateway_forward(br_dev: &str, br_net: &str) -> bool {
     // flows overlay->NIC, established replies NIC->overlay.
     ok &= sudo_ok(
         "iptables FORWARD out",
-        &["iptables", "-A", "FORWARD", "-i", br_dev, "-o", &nic, "-j", "ACCEPT"],
+        &[
+            "iptables", "-A", "FORWARD", "-i", br_dev, "-o", &nic, "-j", "ACCEPT",
+        ],
     );
     ok &= sudo_ok(
         "iptables FORWARD back",
         &[
-            "iptables", "-A", "FORWARD", "-i", &nic, "-o", br_dev, "-m", "conntrack", "--ctstate",
-            "ESTABLISHED,RELATED", "-j", "ACCEPT",
+            "iptables",
+            "-A",
+            "FORWARD",
+            "-i",
+            &nic,
+            "-o",
+            br_dev,
+            "-m",
+            "conntrack",
+            "--ctstate",
+            "ESTABLISHED,RELATED",
+            "-j",
+            "ACCEPT",
         ],
     );
     if ok {
@@ -270,12 +318,35 @@ pub(crate) fn remove_gateway_forward(br_dev: &str, br_net: &str) {
         return;
     };
     let _ = sudo(&[
-        "iptables", "-t", "nat", "-D", "POSTROUTING", "-s", br_net, "-o", &nic, "-j", "MASQUERADE",
+        "iptables",
+        "-t",
+        "nat",
+        "-D",
+        "POSTROUTING",
+        "-s",
+        br_net,
+        "-o",
+        &nic,
+        "-j",
+        "MASQUERADE",
     ]);
-    let _ = sudo(&["iptables", "-D", "FORWARD", "-i", br_dev, "-o", &nic, "-j", "ACCEPT"]);
     let _ = sudo(&[
-        "iptables", "-D", "FORWARD", "-i", &nic, "-o", br_dev, "-m", "conntrack", "--ctstate",
-        "ESTABLISHED,RELATED", "-j", "ACCEPT",
+        "iptables", "-D", "FORWARD", "-i", br_dev, "-o", &nic, "-j", "ACCEPT",
+    ]);
+    let _ = sudo(&[
+        "iptables",
+        "-D",
+        "FORWARD",
+        "-i",
+        &nic,
+        "-o",
+        br_dev,
+        "-m",
+        "conntrack",
+        "--ctstate",
+        "ESTABLISHED,RELATED",
+        "-j",
+        "ACCEPT",
     ]);
 }
 

@@ -220,6 +220,47 @@ impl Orchestrator {
         }
     }
 
+    /// Tear down egress edges on `node_ip` whose initiator container is no longer
+    /// in `live` (container died / dereg'd with the node still up). Host-process
+    /// edges (no container) are left alone.
+    pub(crate) async fn teardown_egress_edges_for_missing_containers(
+        &self,
+        node_ip: IpAddr,
+        live: &std::collections::HashSet<String>,
+    ) {
+        let removed: Vec<EgressEdge> = {
+            let mut edges = self.egress_edges.write().await;
+            let keys: Vec<EgressKey> = edges
+                .iter()
+                .filter(|(_, e)| {
+                    e.initiator_ip == node_ip
+                        && e.initiator_docker
+                            .as_ref()
+                            .is_some_and(|c| !live.contains(c))
+                })
+                .map(|(k, _)| k.clone())
+                .collect();
+            keys.into_iter().filter_map(|k| edges.remove(&k)).collect()
+        };
+        for e in removed {
+            if e.net_id == 0 {
+                continue;
+            }
+            println!(
+                "[egress] reaping edge for gone container {:?} on {}",
+                e.initiator_docker, e.initiator_ip
+            );
+            self.send_net_teardown(
+                e.initiator_ip,
+                e.initiator_docker,
+                e.proxy_ip,
+                None,
+                e.net_id,
+            )
+            .await;
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn send_net_setup(
         &self,

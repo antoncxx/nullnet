@@ -13,7 +13,7 @@ use crate::services::service_info::{ServiceInfo, backend_involved_services};
 use crate::timeout::check_timeouts;
 use nullnet_grpc_lib::nullnet_grpc::nullnet_grpc_server::NullnetGrpc;
 use nullnet_grpc_lib::nullnet_grpc::{
-    AgentEvent, BackendTriggerRequest, CertBundle, Empty, EgressTriggerRequest, MsgId, NetMessage,
+    AgentEvent, BackendTriggerRequest, CertBundle, EgressTriggerRequest, Empty, MsgId, NetMessage,
     NetType, ProxyRequest, ServiceTrigger, Services, ServicesListResponse, Upstream,
     agent_event::Event as AgentEventKind,
 };
@@ -285,6 +285,17 @@ impl NullnetGrpcImpl {
 
         self.apply_services_list_by_stack(sender_ip, &service_list_by_stack)
             .await?;
+
+        // Reap egress edges whose initiator container is no longer running on
+        // this node (container died / dereg'd while the node stayed up).
+        let live_containers: HashSet<String> = service_list_by_stack
+            .values()
+            .flatten()
+            .filter_map(|(_, _, dc)| dc.clone())
+            .collect();
+        self.orchestrator
+            .teardown_egress_edges_for_missing_containers(sender_ip, &live_containers)
+            .await;
 
         // Build the trigger config to send back: only the triggers attached
         // to the services this caller declared as hosting. Look up triggers
@@ -676,7 +687,8 @@ impl NullnetGrpcImpl {
                             }
                     });
                     if let Some(r) = replica {
-                        found = Some((name.clone(), r.ip(), r.docker_container().map(String::from)));
+                        found =
+                            Some((name.clone(), r.ip(), r.docker_container().map(String::from)));
                         break 'outer;
                     }
                 }
@@ -693,7 +705,9 @@ impl NullnetGrpcImpl {
             .ensure_egress_edge(initiator_ip, initiator_docker, proxy_ip)
             .await?;
         if built {
-            println!("[egress] edge up for '{initiator_name}' ({initiator_ip}) -> proxy {proxy_ip}");
+            println!(
+                "[egress] edge up for '{initiator_name}' ({initiator_ip}) -> proxy {proxy_ip}"
+            );
         }
         Ok(())
     }
@@ -1233,14 +1247,12 @@ impl NullnetGrpc for NullnetGrpcImpl {
             AgentEventKind::BackendTriggerSendFailed(e) => {
                 Event::backend_trigger_send_failed(e.service_name, e.port as u16, e.error_message)
             }
-            AgentEventKind::EgressTriggerSendFailed(e) => {
-                Event::egress_trigger_send_failed(
-                    e.service_name,
-                    e.dst_ip,
-                    e.dst_port,
-                    e.error_message,
-                )
-            }
+            AgentEventKind::EgressTriggerSendFailed(e) => Event::egress_trigger_send_failed(
+                e.service_name,
+                e.dst_ip,
+                e.dst_port,
+                e.error_message,
+            ),
             AgentEventKind::GatewayForwardInstallFailed(e) => {
                 Event::gateway_forward_install_failed(e.vxlan_id, e.br_net)
             }

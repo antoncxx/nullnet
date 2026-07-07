@@ -10,9 +10,8 @@ use nullnet_grpc_lib::nullnet_grpc::{
     AgentContainerResumeFailed, AgentContainerSuspendFailed, AgentControlChannelAckFailed,
     AgentControlChannelClosed, AgentControlChannelEstablished, AgentDnatInstallFailed,
     AgentDnatRemovalFailed, AgentGatewayForwardInstallFailed, AgentHostMappingFailed,
-    AgentVlanSetupCompleted, AgentVlanSetupFailed,
-    AgentVlanTeardownFailed, AgentVxlanSetupCompleted, AgentVxlanSetupFailed,
-    AgentVxlanTeardownFailed,
+    AgentVlanSetupCompleted, AgentVlanSetupFailed, AgentVlanTeardownFailed,
+    AgentVxlanSetupCompleted, AgentVxlanSetupFailed, AgentVxlanTeardownFailed,
 };
 use nullnet_grpc_lib::nullnet_grpc::{
     AgentEvent, ContainerResume, ContainerSuspend, HostMapping, MsgId, VlanSetup, VlanTeardown,
@@ -334,9 +333,7 @@ async fn handle_vxlan_setup(
     // (no `docker_container` arg) so the initiator container's *forwarded*
     // external traffic can be policy-routed into the bridge. Other edges attach
     // the endpoint to the container as before.
-    if !egress_steer
-        && let Some(container) = &message.docker_container
-    {
+    if !egress_steer && let Some(container) = &message.docker_container {
         cmd.arg(container);
     }
     let script_result = cmd.spawn().and_then(|mut c| c.wait());

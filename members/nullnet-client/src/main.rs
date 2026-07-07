@@ -219,7 +219,13 @@ async fn setup_ebpf_firewall(rtnetlink_handle: &RtNetLinkHandle) -> Result<ebpf:
              {server_ip}:{control_port}, inbound listeners {listen_ports:?})"
         );
     }
-    ebpf::enable(&iface, server_ip, control_port, egress_gateway, &listen_ports)
+    ebpf::enable(
+        &iface,
+        server_ip,
+        control_port,
+        egress_gateway,
+        &listen_ports,
+    )
 }
 
 /// Resolve `CONTROL_SERVICE_ADDR:CONTROL_SERVICE_PORT` to its first IPv4.

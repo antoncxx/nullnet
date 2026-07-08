@@ -188,10 +188,16 @@ client-eBPF + kernel forwarding, no userspace hop.
 
 ## Implementation status
 
-**Written, not yet built/run on Linux** (the eBPF crate builds only via
-`cargo xtask build` on Linux; nullnet-client is Linux-only). aya API surface
-(`LruHashMap`, `SchedClassifier` two-program attach) verified against
-aya-ebpf 0.1.1 docs.
+**Built, deployed, and verified end-to-end on Linux** (Debian 13, kernel 6.12,
+two-node: gateway + initiator). Two bugs were fixed during first bring-up:
+- **eBPF wouldn't compile:** `#[inline]` on `try_firewall`/`ptr_at` is only a
+  hint, so bpf-linker saw a non-inlined aggregate return
+  (`Result<i32,()>` → `{i32,i32}`) and rejected it. Fixed with `#[inline(always)]`.
+- **Egress steer never fired:** `commands::egress::prio_base` used `100_000 +
+  net_id*16` for the `ip rule` priorities — *above* the `main` table rule (32766).
+  ip-rule evaluates low→high, so `main`'s default route matched first and steered
+  traffic went out the uplink (dropped by the strict firewall) instead of into the
+  tunnel. Fixed to `1_000 + net_id*16` (below 32766).
 
 - **A — done (code).** `ebpf/src/main.rs` rewritten into stateful
   `nullnet_fw_ingress` / `nullnet_fw_egress` classifiers sharing a `CT`
@@ -213,16 +219,33 @@ aya-ebpf 0.1.1 docs.
 - **Follow-ups not started:** D (cgroup policy + trigger), ICMP tracking on strict
   nodes, CT timestamp for idle-TTL GC (value is presence-only for now).
 
-### To verify on Linux
-- `cargo xtask build` compiles the two-program eBPF object; `nullnet_fw_ingress`
-  / `nullnet_fw_egress` load and attach; the verifier accepts the `CtKey` struct
-  map key and tuple-ordering.
-- TC-egress-after-POSTROUTING / TC-ingress-before-netfilter ordering so the
-  masqueraded tuple and its return share a canonical CT key (the load-bearing
-  assumption).
-- Gateway `MASQUERADE` FORWARD rules survive Docker's `FORWARD` policy (may need
-  `DOCKER-USER` insertion instead of appending to `FORWARD`).
+### Verified on Linux (kernel 6.12)
+- `cargo xtask build --release` compiles the two-program eBPF object (after the
+  `#[inline(always)]` fix); `nullnet_fw_ingress`/`nullnet_fw_egress` load and the
+  verifier accepts the `CtKey` map key. aya uses **TCX** attach on ≥6.6, so the
+  programs show in `bpftool net show`, not classic `tc filter show`.
+- TC-egress-after-POSTROUTING / TC-ingress-before-netfilter ordering holds: a
+  masqueraded egress flow and its return share one canonical CT key — confirmed by
+  a full round trip (`conntrack` shows `[ASSURED]` on the SNAT'd tuple).
+- Gateway `MASQUERADE` + FORWARD rules coexist with Docker's `FORWARD` policy
+  (appended rules sufficed; no `DOCKER-USER` insertion needed here).
 - Gateway reachable on 80/443 (reverse proxy) and 22 with `PROXY_MODE` gone.
+- **End-to-end egress confirmed:** a registered service container reached the
+  public internet through the gateway — container → SNAT#1 (initiator overlay IP)
+  → VXLAN → decap → MASQUERADE (SNAT#2) → internet, with the reply de-SNAT'd back
+  through both hops.
+
+### Server env required for egress
+- `PROXY_IP` must be set on `nullnet-server` (the gateway host) or egress brokering
+  is disabled ("PROXY_IP is not configured"). The egress initiator must be a
+  **registered service replica** (matched by node IP + `docker_container`) and must
+  have a default route so its first external packet reaches the NFQUEUE trigger.
+
+### Known gap (not egress-specific)
+- A **strict** node's own host traffic (DNS, DHCP renewal, NTP, inbound Swarm
+  2377/7946) is dropped — there is no config knob for host-essential outbound, and
+  `INGRESS_ALLOW_PORTS` is TCP-inbound only (no UDP listeners). SSH survives via
+  `INGRESS_ALLOW_PORTS=22` + established-return CT.
 
 ## Phase D (deferred): per-service egress policy + cgroup trigger
 

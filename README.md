@@ -38,11 +38,17 @@ The repository should be cloned under `/root` so the provided `setup-*.sh` scrip
   ```
   NET_TYPE=VXLAN
   CERT_ENCRYPTION_KEY=<32 raw bytes or 64 hex chars>
+  PROXY_IP=192.168.1.100
   ```
   `CERT_ENCRYPTION_KEY` is **required** — the server refuses to start without it. It encrypts
   TLS certificate private keys (and the DNS-provider credentials of ACME-issued certs) at rest;
   keep it stable, since rotating it makes existing encrypted data undecryptable. Generate one with
   `openssl rand -hex 32`.
+
+  `PROXY_IP` is the IP of the host running `nullnet-proxy` (the egress gateway). It is **required to
+  enable egress brokering**: when a registered service reaches out to the internet the server builds
+  a per-initiator egress edge to this host. If unset, egress is disabled (the trigger is rejected
+  with "PROXY_IP is not configured") — ingress still works.
 
 - TLS certificates are issued from Let's Encrypt via a DNS-01 challenge (UI: *Certificates* page).
   Each cert stores its DNS-provider credentials encrypted at rest and is **renewed automatically**
@@ -119,7 +125,22 @@ The repository should be cloned under `/root` so the provided `setup-*.sh` scrip
   ```
   CONTROL_SERVICE_ADDR=192.168.1.100
   CONTROL_SERVICE_PORT=50051
+  INGRESS_ALLOW_PORTS=22,8080
+  EGRESS_GATEWAY=true          # only on the host that runs nullnet-proxy
   ```
+
+  > **⚠️ The client attaches a default-deny eBPF firewall to the uplink NIC on startup.** By default
+  > it permits only the nullnet control plane (gRPC to the server) and data plane (VXLAN to peers),
+  > plus established returns. **Set `INGRESS_ALLOW_PORTS` to include `22`** (and any other inbound TCP
+  > listeners such as `8080` for the dashboard) or you will lose SSH the moment the client starts —
+  > enabling it over an SSH session with `22` missing kills the session. Ports are inbound TCP only.
+
+  `EGRESS_GATEWAY=true` is set **only on the gateway host** (the one running `nullnet-proxy`). It
+  switches that node's firewall to gateway posture — all outbound is allowed (and tracked) and it
+  forwards brokered egress to the internet, plus the implicit inbound `80`/`443`. Every other
+  (strict) node keeps outbound restricted to the control/data plane. Note: a strict node's *own*
+  host traffic (DNS, DHCP renewal, NTP, non-nullnet outbound) is dropped — pin a static IP and be
+  aware SSH survives only via `INGRESS_ALLOW_PORTS` + established-return tracking.
 
 - service configuration must be stored at `members/nullnet-client/services.toml`. Each entry
   must declare its `stack` (which must match a `services/<stack>.toml` on the server, otherwise

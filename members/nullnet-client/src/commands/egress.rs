@@ -141,7 +141,11 @@ fn table_for(net_id: u32) -> u32 {
 }
 fn prio_base(net_id: u32) -> u32 {
     // 16 priorities reserved per edge: internal bypasses then the catch-all.
-    100_000 + net_id * 16
+    // MUST stay below the `main` table rule (priority 32766): ip-rule evaluates
+    // in ascending priority order, so a higher number lets `main`'s default
+    // route match first and the egress steer never fires. 1000 + net_id*16
+    // keeps every edge's rules (net_id up to ~1900) under 32766.
+    1_000 + net_id * 16
 }
 
 /// Initiator side: steer `container_ip`'s external traffic into the overlay

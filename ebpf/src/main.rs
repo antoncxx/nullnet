@@ -89,7 +89,7 @@ pub fn nullnet_fw_egress(ctx: TcContext) -> i32 {
     try_firewall(&ctx, true).unwrap_or(TC_ACT_SHOT)
 }
 
-#[inline]
+#[inline(always)]
 fn ptr_at<T>(ctx: &TcContext, offset: usize) -> Result<*const T, ()> {
     let start = ctx.data();
     let end = ctx.data_end();
@@ -105,7 +105,7 @@ fn is_gateway() -> bool {
     unsafe { core::ptr::read_volatile(&EGRESS_GATEWAY) != 0 }
 }
 
-#[inline]
+#[inline(always)]
 fn try_firewall(ctx: &TcContext, is_egress: bool) -> Result<i32, ()> {
     let eth_header: *const EthHdr = ptr_at(ctx, 0)?;
     let ether_type = EtherType::try_from(unsafe { (*eth_header).ether_type }).map_err(|_| ())?;

@@ -227,8 +227,10 @@ two-node: gateway + initiator). Two bugs were fixed during first bring-up:
 - **Trigger:** stays on NFQUEUE queue-1 (`egress_listener.rs`) — B's TC-observe
   was evaluated and rejected (see build order #3). The eventual eBPF trigger is
   folded into D.
-- **Follow-ups not started:** D (cgroup policy + trigger), ICMP tracking on strict
-  nodes, CT timestamp for idle-TTL GC (value is presence-only for now).
+- **Follow-ups not started:** D (cgroup policy + trigger). Idle-TTL GC of an
+  alive-but-unused edge is a deliberate non-goal — edges reap on node disconnect
+  and container death/dereg, matching how backend-trigger overlay edges behave
+  (no data-plane idleness sweep). ICMP is always allowed, so its tracking is moot.
 
 ### Verified on Linux (kernel 6.12)
 - `cargo xtask build --release` compiles the two-program eBPF object (after the
@@ -269,9 +271,9 @@ two-node: gateway + initiator). Two bugs were fixed during first bring-up:
 ## Open items (pick up next session)
 
 1. **Deferred roadmap (by decision, not regressions):** Phase D (per-service egress
-   policy via cgroup `sock_addr`; v1 is allow-all — see below); ICMP tracking on
-   strict nodes; peer-scoped egress rule for cluster ports (see limitation above);
-   CT idle-TTL GC (map is presence-only, LRU-evicted, no timestamp).
+   policy via cgroup `sock_addr`; v1 is allow-all — see below); peer-scoped egress
+   rule for cluster ports (see limitation above). Idle-TTL GC of unused edges and
+   ICMP tracking are intentionally *not* pursued (see "Follow-ups not started").
 
 2. **Verify the explicit-allowlist redesign on Linux** (code-complete, unbuilt
    here — toolchain lacks `edition2024`). Rebuild the eBPF object, confirm the four
@@ -318,10 +320,10 @@ Until D lands, egress remains allow-all and the trigger stays on NFQUEUE.
   from the old design still applies; confirm masquerade + forward behave under the
   `LOCAL_IP == REMOTE_IP` veth branch of `vxlan-setup.sh`.
 - Edge teardown: **node disconnect** reverses both sides; **container death /
-  dereg** (node still up) is now reaped via the per-node `services_list` (edges
-  whose initiator container is no longer running are torn down —
-  `teardown_egress_edges_for_missing_containers`). Still open: **idle-TTL** for an
-  edge whose container is alive but egress goes unused — the CT map could carry
-  per-flow timestamps (currently presence-only) as the data-plane idleness signal.
+  dereg** (node still up) is reaped via the per-node `services_list` (edges whose
+  initiator container is no longer running are torn down —
+  `teardown_egress_edges_for_missing_containers`). An alive-but-idle edge is
+  **deliberately not** idle-TTL'd — same as backend-trigger overlay edges, which
+  also persist until disconnect/container death with no data-plane idleness sweep.
 - MTU: kernel VXLAN + masquerade path must respect the per-node MSS clamp
   (`nullnet_vxlan_mtu_blackhole`).

@@ -1,18 +1,21 @@
 use crate::nfqueue::cache::BridgeIpCache;
 use crate::nfqueue::parse::ipv4_src_and_dst_port;
+use crate::nfqueue::recv_loop::spawn_queue_loop;
 use crate::triggers::{TriggerState, TriggersState};
-use nfq::{Message, Queue, Verdict};
+use nfq::{Message, Verdict};
 use nullnet_grpc_lib::NullnetGrpcInterface;
 use nullnet_grpc_lib::nullnet_grpc::{
     AgentBackendTriggerSendFailed, AgentEvent, agent_event::Event as AgentEventKind,
 };
 use std::collections::HashMap;
-use std::sync::mpsc::{Sender, TryRecvError};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
+/// Backend-trigger NFQUEUE id.
+const QUEUE_ID: u16 = 0;
 /// Cap on concurrent in-flight per-packet handlers. Bounds memory + gRPC
 /// fan-out under burst. Each permit roughly equals one in-flight
 /// `backend_trigger` round-trip.
@@ -28,8 +31,6 @@ const TRIGGER_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the handler waits for the matching `VxlanSetup` to land before
 /// giving up on the held packet.
 const ACTIVE_TIMEOUT: Duration = Duration::from_secs(5);
-/// Idle sleep between recv polls when there's nothing to do.
-const IDLE_SLEEP: Duration = Duration::from_millis(1);
 
 /// State shared by every per-packet handler. Cloned freely across tokio tasks.
 #[derive(Clone)]
@@ -41,85 +42,18 @@ pub struct ListenerCtx {
     pub semaphore: Arc<Semaphore>,
 }
 
-/// Spawn the NFQUEUE recv loop on a dedicated OS thread. The thread owns the
-/// `Queue`, drains pending verdicts each tick, and pulls new packets in
-/// non-blocking mode. Each new packet is handed off to a tokio task via the
-/// captured `Handle` so the slow async work (gRPC, waiter) doesn't stall
-/// recv.
-///
-/// Failure to open/bind the queue is logged and the thread exits — the rest
-/// of the client keeps running. With `--queue-bypass` on the iptables rule,
-/// the absence of a listener fail-opens, so traffic flows unaltered.
+/// Spawn the backend-trigger recv loop (queue 0). Each packet is held until
+/// `handle_packet` resolves a verdict — see `recv_loop::spawn_queue_loop`.
 pub fn spawn_recv_thread(ctx: ListenerCtx) {
-    let handle = tokio::runtime::Handle::current();
-    std::thread::spawn(move || {
-        let mut queue = match Queue::open() {
-            Ok(q) => q,
-            Err(e) => {
-                eprintln!("[nfqueue] open queue failed: {e} (need CAP_NET_ADMIN)");
-                return;
-            }
-        };
-        if let Err(e) = queue.bind(0) {
-            eprintln!("[nfqueue] bind queue 0 failed: {e}");
-            return;
-        }
-        if let Err(e) = queue.set_copy_range(0, COPY_RANGE) {
-            eprintln!("[nfqueue] set_copy_range: {e}");
-        }
-        if let Err(e) = queue.set_queue_max_len(0, QUEUE_MAX_LEN) {
-            eprintln!("[nfqueue] set_queue_max_len: {e}");
-        }
-        // Kernel-side fail-open is off: we want NFQUEUE drops to be visible
-        // when the listener can't keep up, not silently let traffic through.
-        // The iptables `--queue-bypass` flag separately covers the no-consumer
-        // case (this thread crashed or exited).
-        if let Err(e) = queue.set_fail_open(0, false) {
-            eprintln!("[nfqueue] set_fail_open: {e}");
-        }
-        queue.set_nonblocking(true);
-
-        let (verdict_tx, verdict_rx) = std::sync::mpsc::channel::<Message>();
-        println!("[nfqueue] recv loop running on queue 0");
-
-        loop {
-            // Drain any verdicts that came back from per-packet handlers.
-            let mut did_work = false;
-            loop {
-                match verdict_rx.try_recv() {
-                    Ok(msg) => {
-                        did_work = true;
-                        if let Err(e) = queue.verdict(msg) {
-                            eprintln!("[nfqueue] verdict failed: {e}");
-                        }
-                    }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => return,
-                }
-            }
-            // Drain packets currently waiting in the kernel queue.
-            loop {
-                match queue.recv() {
-                    Ok(msg) => {
-                        did_work = true;
-                        let ctx = ctx.clone();
-                        let verdict_tx = verdict_tx.clone();
-                        handle.spawn(async move {
-                            handle_packet(msg, ctx, verdict_tx).await;
-                        });
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                    Err(e) => {
-                        eprintln!("[nfqueue] recv error: {e}");
-                        break;
-                    }
-                }
-            }
-            if !did_work {
-                std::thread::sleep(IDLE_SLEEP);
-            }
-        }
-    });
+    spawn_queue_loop(
+        QUEUE_ID,
+        COPY_RANGE,
+        QUEUE_MAX_LEN,
+        move |msg, verdict_tx| {
+            let ctx = ctx.clone();
+            handle_packet(msg, ctx, verdict_tx)
+        },
+    );
 }
 
 async fn handle_packet(mut msg: Message, ctx: ListenerCtx, verdict_tx: Sender<Message>) {

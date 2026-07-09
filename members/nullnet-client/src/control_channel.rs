@@ -385,6 +385,19 @@ async fn handle_vxlan_setup(
                             container_ip: cip,
                         },
                     );
+                    // Steering is live — release any egress SYN the NFQUEUE
+                    // listener is holding for this initiator. Mirrors the
+                    // backend DNAT→mark_active ordering (install first, then
+                    // wake, so the freed packet finds the rule in place).
+                    if let Some(container) = message.docker_container.as_deref() {
+                        triggers_state.mark_active(
+                            container,
+                            crate::triggers::EGRESS_TRIGGER_PORT,
+                            vxlan_id,
+                            gw,
+                            cip,
+                        );
+                    }
                 }
             }
             _ => {

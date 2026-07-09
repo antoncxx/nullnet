@@ -10,6 +10,12 @@ use tokio::sync::Notify;
 /// was lost).
 const PENDING_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Port component of the key for egress triggers. Egress fires once per initiator
+/// container (steering matches every destination), so all its flows share one
+/// entry. Backend triggers only ever key on real listener ports (>0), so this
+/// sentinel never collides with them in the shared `TriggersState`.
+pub const EGRESS_TRIGGER_PORT: u16 = 0;
+
 /// Per-(initiator_container, port) lifecycle. `container_ip` is the bridge IP
 /// the NFQUEUE listener observed when the trigger fired; it is carried through
 /// to `Active` so DNAT install/remove can match the right `-s` source. Legacy

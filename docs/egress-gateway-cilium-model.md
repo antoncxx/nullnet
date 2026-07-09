@@ -224,9 +224,16 @@ two-node: gateway + initiator). Two bugs were fixed during first bring-up:
   `init()` enables `ip_forward`. `EgressState::Intercept` → `Gateway{br_net}`;
   control-channel setup/teardown updated. `nullnet-proxy/src/forward.rs` deleted,
   `forward::start` and the `socket2`/`libc` deps removed. Server unchanged.
-- **Trigger:** stays on NFQUEUE queue-1 (`egress_listener.rs`) — B's TC-observe
-  was evaluated and rejected (see build order #3). The eventual eBPF trigger is
-  folded into D.
+- **Trigger:** stays on NFQUEUE queue-1 (`egress_listener.rs`), now **hold-until-
+  steered** (Linux-untested). Was accept-and-retransmit; now the first SYN is
+  **held** (deferred verdict) while the edge builds and released ACCEPT once
+  `control_channel` calls `mark_active` after `install_steer` — so the *original*
+  packet is policy-routed into the tunnel, not dropped. Reuses the backend-trigger
+  machinery wholesale: shared `recv_loop::spawn_queue_loop` + `TriggersState`,
+  keyed by `(container, EGRESS_TRIGGER_PORT=0)` (egress is once-per-container; the
+  `0` sentinel never collides with backend's real ports). On timeout it drops and
+  the client retransmits (old behaviour). B's TC-observe was rejected (build order
+  #3); the eventual cgroup-hook trigger is folded into D.
 - **Follow-ups not started:** D (cgroup policy + trigger). Idle-TTL GC of an
   alive-but-unused edge is a deliberate non-goal — edges reap on node disconnect
   and container death/dereg, matching how backend-trigger overlay edges behave

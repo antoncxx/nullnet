@@ -205,27 +205,30 @@ async fn setup_ebpf_firewall(rtnetlink_handle: &RtNetLinkHandle) -> Result<ebpf:
         .ok_or("could not find the ethernet interface name")
         .handle_err(location!())?;
 
-    let control_port = *CONTROL_SERVICE_PORT;
-    let egress_gateway = *crate::env::EGRESS_GATEWAY;
-    let listen_ports = crate::env::INGRESS_ALLOW_PORTS.clone();
-    if egress_gateway {
+    let cfg = ebpf::FirewallConfig {
+        server_ip,
+        control_port: *CONTROL_SERVICE_PORT,
+        egress_gateway: *crate::env::EGRESS_GATEWAY,
+        ingress_tcp: crate::env::INGRESS_ALLOW_TCP_PORTS.clone(),
+        ingress_udp: crate::env::INGRESS_ALLOW_UDP_PORTS.clone(),
+        egress_tcp: crate::env::EGRESS_ALLOW_TCP_PORTS.clone(),
+        egress_udp: crate::env::EGRESS_ALLOW_UDP_PORTS.clone(),
+    };
+    if cfg.egress_gateway {
         println!(
             "Attaching eBPF firewall to {iface} in EGRESS-GATEWAY mode (stateful boundary: \
-             outbound allowed + tracked, inbound = established + 80/443 + {listen_ports:?})"
+             outbound allowed + tracked; inbound = established + allowlist \
+             tcp{:?} udp{:?}; ICMP always allowed)",
+            cfg.ingress_tcp, cfg.ingress_udp
         );
     } else {
         println!(
             "Attaching eBPF firewall to {iface} (stateful strict; control plane \
-             {server_ip}:{control_port}, inbound listeners {listen_ports:?})"
+             {server_ip}:{}; allow in tcp{:?} udp{:?}, out tcp{:?} udp{:?}; ICMP always allowed)",
+            cfg.control_port, cfg.ingress_tcp, cfg.ingress_udp, cfg.egress_tcp, cfg.egress_udp
         );
     }
-    ebpf::enable(
-        &iface,
-        server_ip,
-        control_port,
-        egress_gateway,
-        &listen_ports,
-    )
+    ebpf::enable(&iface, &cfg)
 }
 
 /// Resolve `CONTROL_SERVICE_ADDR:CONTROL_SERVICE_PORT` to its first IPv4.

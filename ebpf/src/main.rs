@@ -21,7 +21,7 @@ use network_types::{
 // implement a proper "allow outbound + established returns, restrict inbound"
 // posture instead of the old symmetric all-open PROXY_MODE hack.
 //
-// Base allowlist (both directions):
+// Structural allowlist (nullnet's own plumbing, both directions — not user policy):
 //   - ARP                          (next-hop resolution)
 //   - TCP to/from SERVER_IP:PORT   (nullnet control plane / gRPC)
 //   - UDP 4789/9999 to/from a peer (nullnet data plane: VXLAN / forward)
@@ -29,11 +29,16 @@ use network_types::{
 //   - any packet whose flow is already in the CT map is allowed (established
 //     return); every allowed non-ARP packet (re)inserts its canonical 5-tuple,
 //     so the reverse direction is permitted and hot flows stay warm in the LRU.
-// Role-specific:
+// Configured policy — every host-service allow is explicit:
+//   - ALLOW_PORTS: a per-direction, per-proto destination-port allowlist filled
+//     from {INGRESS,EGRESS}_ALLOW_{TCP,UDP}_PORTS. e.g. DNS = EGRESS udp 53,
+//     a web listener = INGRESS tcp 443, Swarm gossip = INGRESS tcp+udp 7946.
+//   - ICMP is portless and always allowed (echo + PMTUD/errors, both directions).
+// Role:
 //   - EGRESS_GATEWAY node: all *outbound* IPv4 is allowed (it is the sanctioned
-//     internet boundary that forwards brokered egress); *inbound* is only CT
-//     returns + control/data plane + LISTEN_PORTS (+ ICMP for PMTUD).
-//   - strict node: outbound is control/data plane only; inbound adds LISTEN_PORTS.
+//     internet boundary that forwards brokered egress); inbound still obeys the
+//     configured allowlist + CT returns.
+//   - strict node: both directions obey the configured allowlist + CT returns.
 
 const VXLAN_PORT: u16 = 4789;
 const FORWARD_PORT: u16 = 9999;
@@ -45,10 +50,12 @@ const PROTO_UDP: u8 = 17;
 #[map]
 static PEERS: HashMap<u32, u8> = HashMap::with_max_entries(4096, 0);
 
-// Unsolicited inbound TCP listener ports (host-order), e.g. 80/443/22/8080.
-// Populated by userspace from EGRESS_GATEWAY + INGRESS_ALLOW_PORTS.
+// Per-direction, per-proto destination-port allowlist. Key packs direction and
+// protocol alongside the port (see `allow_key`) so ingress/egress and TCP/UDP of
+// the same number are distinct. Populated by userspace from the four
+// {INGRESS,EGRESS}_ALLOW_{TCP,UDP}_PORTS env lists.
 #[map]
-static LISTEN_PORTS: HashMap<u16, u8> = HashMap::with_max_entries(64, 0);
+static ALLOW_PORTS: HashMap<u32, u8> = HashMap::with_max_entries(256, 0);
 
 // Connection tracking: canonical 5-tuple -> presence. LRU so it self-bounds;
 // hot flows are refreshed on every packet (re-insert) and won't be evicted under
@@ -135,9 +142,9 @@ fn try_firewall(ctx: &TcContext, is_egress: bool) -> Result<i32, ()> {
                         u16::from_be_bytes(unsafe { (*udp).dst }),
                     )
                 }
-                // ICMP is portless: the gateway allows it (echo + PMTUD/errors,
-                // both directions); strict nodes drop it as before. Not tracked.
-                IpProto::Icmp => return Ok(if is_gateway() { TC_ACT_OK } else { TC_ACT_SHOT }),
+                // ICMP is portless and always allowed (echo + PMTUD/errors, both
+                // directions). Not CT-tracked. Simpler than gating it for now.
+                IpProto::Icmp => return Ok(TC_ACT_OK),
                 _ => return Ok(TC_ACT_SHOT),
             };
 
@@ -169,14 +176,13 @@ fn base_allow(
     if proto == PROTO_UDP && data_plane(src, dst, src_port, dst_port) {
         return true;
     }
-    match (is_gateway(), is_egress) {
-        // Gateway outbound: it is the internet boundary — allow all, track it.
-        (true, true) => true,
-        // Gateway / strict inbound: only real listeners (CT returns handled above).
-        (_, false) => proto == PROTO_TCP && is_listen_port(dst_port),
-        // Strict outbound: control/data plane only (handled above).
-        (false, true) => false,
+    // Gateway outbound: it is the internet boundary — allow all, track it.
+    if is_gateway() && is_egress {
+        return true;
     }
+    // Everything else obeys the explicit destination-port allowlist. CT returns
+    // were handled by the caller, so this only admits flow-initiating packets.
+    is_port_allowed(is_egress, proto, dst_port)
 }
 
 // Control plane: TCP where the server endpoint is on the control port, either dir.
@@ -202,9 +208,16 @@ fn is_peer(ip: u32) -> bool {
     unsafe { PEERS.get(&ip) }.is_some()
 }
 
+// Is `port` allowed as a destination in this direction/proto? (ALLOW_PORTS key
+// layout must match userspace `allow_key` in members/nullnet-client/src/ebpf.)
 #[inline]
-fn is_listen_port(port: u16) -> bool {
-    unsafe { LISTEN_PORTS.get(&port) }.is_some()
+fn is_port_allowed(is_egress: bool, proto: u8, port: u16) -> bool {
+    unsafe { ALLOW_PORTS.get(&allow_key(is_egress, proto, port)) }.is_some()
+}
+
+#[inline]
+fn allow_key(is_egress: bool, proto: u8, port: u16) -> u32 {
+    ((is_egress as u32) << 24) | ((proto as u32) << 16) | port as u32
 }
 
 // Order the two endpoints so both directions of a flow yield the same key.

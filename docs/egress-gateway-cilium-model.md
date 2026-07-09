@@ -115,11 +115,15 @@ Add a `BPF_MAP_TYPE_LRU_HASH` keyed by normalized 5-tuple to `ebpf/src/main.rs`:
 - **TC ingress**: if the reverse tuple is present → `TC_ACT_OK` (established
   return), checked *before* the strict allowlist.
 
-Gateway posture becomes **outbound + established-return + explicit listeners
-(80/443/22/8080)**, dropping unsolicited inbound — a normal stateful-router
-posture. `PROXY_MODE` (all-IPv4) is removed. Initiators stay strict: their real
-NIC only ever carries VXLAN-to-peer, so A on a pure initiator matters only for the
-co-located-server management traffic in `ebpf-firewall-traffic.md`.
+Gateway posture becomes **outbound (all, tracked) + established-return + the
+explicit `ALLOW_PORTS` allowlist**, dropping everything else — a normal
+stateful-router posture. `PROXY_MODE` (all-IPv4) is removed. Every host-service
+allow is opt-in (no implicit `80/443`): four env lists
+`{INGRESS,EGRESS}_ALLOW_{TCP,UDP}_PORTS` (ICMP is always allowed, both
+directions). Initiators stay strict: their real NIC only ever carries
+VXLAN-to-peer, so A on a pure initiator
+matters only for the co-located-server management traffic in
+`ebpf-firewall-traffic.md`.
 
 **Verify on first Linux run:** TC-egress runs *after* `nat POSTROUTING` and
 TC-ingress runs *before* netfilter, so the masqueraded egress tuple and its return
@@ -201,12 +205,19 @@ two-node: gateway + initiator). Two bugs were fixed during first bring-up:
 
 - **A — done (code).** `ebpf/src/main.rs` rewritten into stateful
   `nullnet_fw_ingress` / `nullnet_fw_egress` classifiers sharing a `CT`
-  `LruHashMap` (canonical 5-tuple → presence) + `LISTEN_PORTS` map. `PROXY_MODE`
+  `LruHashMap` (canonical 5-tuple → presence) + an `ALLOW_PORTS` map. `PROXY_MODE`
   (all-IPv4) replaced by `EGRESS_GATEWAY` stateful posture: gateway allows all
-  outbound (tracked) and inbound only for established returns + control/data
-  plane + 80/443 + `INGRESS_ALLOW_PORTS`; strict nodes add inbound listeners
-  only. `ebpf/mod.rs` loads/attaches both programs and fills `LISTEN_PORTS`;
-  `env.rs` gains `INGRESS_ALLOW_PORTS`; `main.rs` passes it.
+  outbound (tracked); everything else is CT returns + control/data plane + the
+  explicit allowlist. `ebpf/mod.rs` loads/attaches both programs and fills
+  `ALLOW_PORTS`; `env.rs`/`main.rs` supply the config (see next bullet).
+- **Explicit allowlist — done (code), supersedes the "known gap" below.** Nothing
+  host-service is hardcoded: `ALLOW_PORTS` is keyed by `(dir<<24)|(proto<<16)|port`
+  and filled from four env lists `{INGRESS,EGRESS}_ALLOW_{TCP,UDP}_PORTS` (matched
+  on destination port). ICMP is always allowed (both directions — echo + PMTUD),
+  not gated. The old implicit gateway `80/443` and the single TCP-inbound
+  `INGRESS_ALLOW_PORTS` are gone — the gateway now lists `80,443` in
+  `INGRESS_ALLOW_TCP_PORTS`.
+  Userspace params bundled into `ebpf::FirewallConfig`.
 - **Gateway forwarding — done (code).** `commands::egress` replaces
   `install_intercept` (TPROXY) with `install_gateway_forward` (per-edge
   `MASQUERADE` on `-s <br_net> -o <default-route NIC>` + FORWARD accepts);
@@ -241,11 +252,31 @@ two-node: gateway + initiator). Two bugs were fixed during first bring-up:
   **registered service replica** (matched by node IP + `docker_container`) and must
   have a default route so its first external packet reaches the NFQUEUE trigger.
 
-### Known gap (not egress-specific)
-- A **strict** node's own host traffic (DNS, DHCP renewal, NTP, inbound Swarm
-  2377/7946) is dropped — there is no config knob for host-essential outbound, and
-  `INGRESS_ALLOW_PORTS` is TCP-inbound only (no UDP listeners). SSH survives via
-  `INGRESS_ALLOW_PORTS=22` + established-return CT.
+### Strict-node host traffic — RESOLVED (code; Linux-untested)
+- Was: a strict node's own host traffic (DNS, DHCP renewal, NTP, inbound Swarm
+  2377/7946) was dropped with no config knob, and the lone `INGRESS_ALLOW_PORTS`
+  was TCP-inbound only. **Fixed** by the explicit allowlist above: each is now an
+  opt-in entry — DNS/NTP via `EGRESS_ALLOW_UDP_PORTS=53,123`, DHCP via
+  `EGRESS_ALLOW_UDP_PORTS=67` (+ inbound `68` for broadcast replies), Swarm via
+  `INGRESS_ALLOW_TCP_PORTS=2377,7946` and `INGRESS_ALLOW_UDP_PORTS=7946`. ICMP is
+  always allowed (both directions). Default-deny preserved otherwise.
+- **Remaining limitation (documented, not solved):** the egress lists match on
+  *destination* port, so a strict node's node-initiated Swarm gossip *out* to a
+  peer's `7946` needs `EGRESS_ALLOW_{TCP,UDP}_PORTS=7946` too. This widens egress
+  to any host on `7946` (there is no peer-scoped egress rule yet). Acceptable for
+  opt-in cluster ports.
+
+## Open items (pick up next session)
+
+1. **Deferred roadmap (by decision, not regressions):** Phase D (per-service egress
+   policy via cgroup `sock_addr`; v1 is allow-all — see below); ICMP tracking on
+   strict nodes; peer-scoped egress rule for cluster ports (see limitation above);
+   CT idle-TTL GC (map is presence-only, LRU-evicted, no timestamp).
+
+2. **Verify the explicit-allowlist redesign on Linux** (code-complete, unbuilt
+   here — toolchain lacks `edition2024`). Rebuild the eBPF object, confirm the four
+   `ALLOW_PORTS` directions load, and re-run the strict-node host traffic
+   (DNS/NTP/SSH) and end-to-end egress checks with the new env vars.
 
 ## Phase D (deferred): per-service egress policy + cgroup trigger
 

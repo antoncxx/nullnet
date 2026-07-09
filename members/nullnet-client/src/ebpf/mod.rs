@@ -2,15 +2,17 @@
 //!
 //! Loads the `nullnet_fw_ingress` / `nullnet_fw_egress` TC classifiers and
 //! attaches them to the ingress and egress hooks of the host's primary
-//! interface. Base allow is nullnet control-plane (gRPC) + data-plane
+//! interface. Structural allow is nullnet control-plane (gRPC) + data-plane
 //! (VXLAN/forward to known peers) + ARP; a CT map then permits established
-//! returns. On the egress-gateway host all outbound is allowed and tracked while
-//! inbound is restricted to established + LISTEN_PORTS (+ 80/443). Peers are
-//! added/removed from the `PEERS` map by the control channel as edges come and go.
+//! returns. ICMP is always allowed (both directions). Everything else is an
+//! explicit, env-driven allow: the four `{INGRESS,EGRESS}_ALLOW_{TCP,UDP}_PORTS`
+//! lists (→ `ALLOW_PORTS` map). On the egress-gateway host all outbound is
+//! additionally allowed and tracked. Peers are added/removed from the `PEERS` map
+//! by the control channel as edges come and go.
 //!
 //! Loading: raise the memlock rlimit, `EbpfLoader` with `set_global`, ensure a
 //! clsact qdisc, load+attach each `SchedClassifier` to its hook, then populate
-//! LISTEN_PORTS.
+//! ALLOW_PORTS.
 
 use aya::Ebpf;
 use aya::maps::{HashMap as AyaHashMap, MapData};
@@ -21,6 +23,28 @@ use std::sync::{Arc, Mutex};
 
 const INGRESS_PROG: &str = "nullnet_fw_ingress";
 const EGRESS_PROG: &str = "nullnet_fw_egress";
+
+const PROTO_TCP: u8 = 6;
+const PROTO_UDP: u8 = 17;
+
+/// Explicit firewall allow policy, all env-driven (see `crate::env`). Nothing is
+/// hardcoded: every host-service port a node accepts or initiates to is listed
+/// here. nullnet's own control/data plane and CT returns are always allowed.
+pub struct FirewallConfig {
+    pub server_ip: Ipv4Addr,
+    pub control_port: u16,
+    pub egress_gateway: bool,
+    pub ingress_tcp: Vec<u16>,
+    pub ingress_udp: Vec<u16>,
+    pub egress_tcp: Vec<u16>,
+    pub egress_udp: Vec<u16>,
+}
+
+/// Pack direction + protocol + port into the `ALLOW_PORTS` key. MUST match the
+/// eBPF-side `allow_key` in `ebpf/src/main.rs`.
+fn allow_key(is_egress: bool, proto: u8, port: u16) -> u32 {
+    ((is_egress as u32) << 24) | ((proto as u32) << 16) | port as u32
+}
 
 /// Identifies the edge a peer allowlist entry belongs to, so a teardown (which
 /// carries only the net id, not the remote IP) can decrement the right peer.
@@ -110,13 +134,7 @@ impl FirewallPeers {
     }
 }
 
-pub fn enable(
-    iface: &str,
-    server_ip: Ipv4Addr,
-    control_port: u16,
-    egress_gateway: bool,
-    listen_ports: &[u16],
-) -> Result<Firewall, Error> {
+pub fn enable(iface: &str, cfg: &FirewallConfig) -> Result<Firewall, Error> {
     use aya::EbpfLoader;
     use aya::programs::{TcAttachType, tc};
 
@@ -124,8 +142,9 @@ pub fn enable(
 
     // Bind the globals to locals: `set_global` holds a borrow until `load()`,
     // so a temporary (e.g. `&u32::from(..)`) would dangle.
-    let server_ip_be = u32::from(server_ip);
-    let gateway_u8: u8 = u8::from(egress_gateway);
+    let server_ip_be = u32::from(cfg.server_ip);
+    let control_port = cfg.control_port;
+    let gateway_u8: u8 = u8::from(cfg.egress_gateway);
     let mut loader = EbpfLoader::new();
     loader.set_global("SERVER_IP", &server_ip_be, true);
     loader.set_global("CONTROL_PORT", &control_port, true);
@@ -143,13 +162,16 @@ pub fn enable(
         Err(e) => println!("[ebpf] clsact qdisc add returned: {e} (ok if already present)"),
     }
 
-    // Direction-specific programs sharing the PEERS/LISTEN_PORTS/CT maps: the
+    // Direction-specific programs sharing the PEERS/ALLOW_PORTS/CT maps: the
     // ingress classifier enforces inbound, the egress one outbound.
     attach_classifier(&mut bpf, INGRESS_PROG, iface, TcAttachType::Ingress)?;
     attach_classifier(&mut bpf, EGRESS_PROG, iface, TcAttachType::Egress)?;
-    println!("[ebpf] nullnet firewall attached to {iface} (stateful; gateway={egress_gateway})");
+    println!(
+        "[ebpf] nullnet firewall attached to {iface} (stateful; gateway={})",
+        cfg.egress_gateway
+    );
 
-    populate_listen_ports(&mut bpf, egress_gateway, listen_ports)?;
+    populate_allow_ports(&mut bpf, cfg)?;
 
     let peers_map: AyaHashMap<MapData, u32, u8> = bpf
         .take_map("PEERS")
@@ -183,24 +205,26 @@ fn attach_classifier(
     Ok(())
 }
 
-/// Fill the LISTEN_PORTS map with the unsolicited-inbound TCP ports the stateful
-/// firewall accepts. The gateway implicitly serves the reverse proxy on 80/443;
-/// `extra` (from `INGRESS_ALLOW_PORTS`) adds SSH/dashboard/etc. The map is taken
-/// only to populate it; the attached programs keep it alive kernel-side.
-fn populate_listen_ports(bpf: &mut Ebpf, gateway: bool, extra: &[u16]) -> Result<(), Error> {
-    let mut map: AyaHashMap<MapData, u16, u8> = bpf
-        .take_map("LISTEN_PORTS")
-        .ok_or("LISTEN_PORTS map not found in bytecode")
+/// Fill the ALLOW_PORTS map from the four explicit env lists. Each port is keyed
+/// by direction + protocol (see `allow_key`); nothing is added implicitly. The map
+/// is taken only to populate it; the attached programs keep it alive kernel-side.
+fn populate_allow_ports(bpf: &mut Ebpf, cfg: &FirewallConfig) -> Result<(), Error> {
+    let mut map: AyaHashMap<MapData, u32, u8> = bpf
+        .take_map("ALLOW_PORTS")
+        .ok_or("ALLOW_PORTS map not found in bytecode")
         .handle_err(location!())?
         .try_into()
         .handle_err(location!())?;
-    if gateway {
-        for p in [80u16, 443] {
-            let _ = map.insert(p, 0u8, 0);
+    let sets = [
+        (false, PROTO_TCP, &cfg.ingress_tcp),
+        (false, PROTO_UDP, &cfg.ingress_udp),
+        (true, PROTO_TCP, &cfg.egress_tcp),
+        (true, PROTO_UDP, &cfg.egress_udp),
+    ];
+    for (is_egress, proto, ports) in sets {
+        for &p in ports {
+            let _ = map.insert(allow_key(is_egress, proto, p), 0u8, 0);
         }
-    }
-    for &p in extra {
-        let _ = map.insert(p, 0u8, 0);
     }
     Ok(())
 }

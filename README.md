@@ -125,22 +125,26 @@ The repository should be cloned under `/root` so the provided `setup-*.sh` scrip
   ```
   CONTROL_SERVICE_ADDR=192.168.1.100
   CONTROL_SERVICE_PORT=50051
-  INGRESS_ALLOW_PORTS=22,8080
-  EGRESS_GATEWAY=true          # only on the host that runs nullnet-proxy
+  INGRESS_ALLOW_TCP_PORTS=22,8080   # inbound TCP listeners
+  INGRESS_ALLOW_UDP_PORTS=          # inbound UDP listeners (e.g. Swarm gossip 7946)
+  EGRESS_ALLOW_TCP_PORTS=           # outbound TCP dsts (e.g. 80,443 for updates)
+  EGRESS_ALLOW_UDP_PORTS=53,123     # outbound UDP dsts (DNS, NTP)
+  EGRESS_GATEWAY=true               # only on the host that runs nullnet-proxy
   ```
 
-  > **⚠️ The client attaches a default-deny eBPF firewall to the uplink NIC on startup.** By default
-  > it permits only the nullnet control plane (gRPC to the server) and data plane (VXLAN to peers),
-  > plus established returns. **Set `INGRESS_ALLOW_PORTS` to include `22`** (and any other inbound TCP
-  > listeners such as `8080` for the dashboard) or you will lose SSH the moment the client starts —
-  > enabling it over an SSH session with `22` missing kills the session. Ports are inbound TCP only.
+  > **⚠️ The client attaches a default-deny eBPF firewall to the uplink NIC on startup.** It permits
+  > only the nullnet control plane (gRPC to the server), data plane (VXLAN to peers), established
+  > returns, ICMP (always, both directions — echo + PMTUD), and whatever you list in the four
+  > `{INGRESS,EGRESS}_ALLOW_{TCP,UDP}_PORTS` variables (matched on destination port). **Put `22` in
+  > `INGRESS_ALLOW_TCP_PORTS`** or you will lose SSH the moment the client starts — enabling it over an
+  > SSH session with `22` missing kills the session. A host that needs name resolution / time sync needs
+  > `EGRESS_ALLOW_UDP_PORTS=53,123`; DHCP renewal needs `67` (and inbound `68` for broadcast replies).
 
   `EGRESS_GATEWAY=true` is set **only on the gateway host** (the one running `nullnet-proxy`). It
   switches that node's firewall to gateway posture — all outbound is allowed (and tracked) and it
-  forwards brokered egress to the internet, plus the implicit inbound `80`/`443`. Every other
-  (strict) node keeps outbound restricted to the control/data plane. Note: a strict node's *own*
-  host traffic (DNS, DHCP renewal, NTP, non-nullnet outbound) is dropped — pin a static IP and be
-  aware SSH survives only via `INGRESS_ALLOW_PORTS` + established-return tracking.
+  forwards brokered egress to the internet; inbound still obeys the allowlist, so list `80,443`
+  (and `22`) in `INGRESS_ALLOW_TCP_PORTS` there. Every other (strict) node obeys the allowlist in
+  both directions.
 
 - service configuration must be stored at `members/nullnet-client/services.toml`. Each entry
   must declare its `stack` (which must match a `services/<stack>.toml` on the server, otherwise

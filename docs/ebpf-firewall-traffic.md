@@ -103,10 +103,10 @@ The core decision:
 
 Chosen **(a)** for the proxy / egress-gateway host, via `EGRESS_GATEWAY=true`.
 The gateway is the single sanctioned internet-facing host: it terminates ingress
-(80/443, allowed via `INGRESS_ALLOW_PORTS` + the implicit 80/443) and **forwards**
-brokered egress on behalf of services (kernel `ip_forward` + `MASQUERADE`; its
-returns are allowed by the CT map). Pure client-only nodes stay strict: their
-services reach the internet only through the gateway over the overlay, never
-directly. The co-located server's own outbound (rows 7–11, 14–16) is allowed as
-tracked outbound; its inbound management (rows 5–6: SSH, dashboard) via
-`INGRESS_ALLOW_PORTS=22,8080`.
+(list `80,443` in `INGRESS_ALLOW_TCP_PORTS` — nothing is implicit anymore) and
+**forwards** brokered egress on behalf of services (kernel `ip_forward` +
+`MASQUERADE`; its returns are allowed by the CT map). Pure client-only nodes stay
+strict: their services reach the internet only through the gateway over the
+overlay, never directly. The co-located server's own outbound (rows 7–11, 14–16)
+is allowed as tracked outbound; its inbound management (rows 5–6: SSH, dashboard)
+via `INGRESS_ALLOW_TCP_PORTS=22,8080`.

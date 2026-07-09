@@ -32,5 +32,6 @@ export interface TopoEdge {
   setup_ms: number;
   isProxyHop: boolean;
   isInternetEdge: boolean;
+  isEgress: boolean;
   originalIndices: number[];
 }

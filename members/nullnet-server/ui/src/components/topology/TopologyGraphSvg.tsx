@@ -1,6 +1,6 @@
 import type { GraphJson, SessionJson } from '../../types';
 import { NODE_W, NODE_H, INET_W, INET_H, INTERNET_ID } from './types';
-import { buildTopoGraph, layoutNodes, svgDims, edgePath, inetEdgePath, edgeLabelPoints } from './layout';
+import { buildTopoGraph, layoutNodes, svgDims, edgePath, egressEdgePath, inetEdgePath, edgeLabelPoints } from './layout';
 
 interface Props {
   graph: GraphJson;
@@ -74,6 +74,9 @@ export default function TopologyGraphSvg({
         <marker id="arr-inet" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
           <path d="M0,0 L0,6 L8,3 z" fill="rgba(91,156,246,.35)" />
         </marker>
+        <marker id="arr-egress" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L0,6 L8,3 z" fill="rgba(167,139,250,.7)" />
+        </marker>
       </defs>
 
       {onBgClick && <rect x={0} y={0} width={w} height={h} fill="transparent" onClick={onBgClick} />}
@@ -110,8 +113,11 @@ export default function TopologyGraphSvg({
         const count = e.originalIndices.length;
         const stroke = isSel
           ? 'rgba(91,156,246,.9)'
+          : e.isEgress ? 'rgba(167,139,250,.55)'
           : e.isProxyHop ? 'rgba(251,191,36,.35)' : 'rgba(255,255,255,.18)';
-        const arrowId = isSel ? 'arr-sel' : e.isProxyHop ? 'arr-proxy' : 'arr';
+        const arrowId = isSel ? 'arr-sel' : e.isEgress ? 'arr-egress' : e.isProxyHop ? 'arr-proxy' : 'arr';
+        const dash = isSel ? undefined : e.isEgress ? '2 4' : e.isProxyHop ? '4 3' : undefined;
+        const path = e.isEgress ? egressEdgePath(fp, tp) : edgePath(fp, tp);
         const midX = (fp.x + tp.x) / 2 + NODE_W / 2;
         const midY = (fp.y + tp.y) / 2 + NODE_H / 2;
 
@@ -136,29 +142,37 @@ export default function TopologyGraphSvg({
             onClick={onEdgeClick ? (ev) => { ev.stopPropagation(); onEdgeClick(e.from, e.to, e.originalIndices); } : undefined}
             style={{ cursor: onEdgeClick ? 'pointer' : 'default', opacity: dimmed ? 0.1 : 1 }}
           >
-            {onEdgeClick && <path d={edgePath(fp, tp)} fill="none" stroke="transparent" strokeWidth="14" />}
+            {onEdgeClick && <path d={path} fill="none" stroke="transparent" strokeWidth="14" />}
             <path
-              d={edgePath(fp, tp)} fill="none" stroke={stroke}
+              d={path} fill="none" stroke={stroke}
               strokeWidth={isSel ? 2 : 1.5}
-              strokeDasharray={e.isProxyHop && !isSel ? '4 3' : undefined}
+              strokeDasharray={dash}
               markerEnd={`url(#${arrowId})`}
               pointerEvents="none"
             />
 
-            {/* Default labels — hidden when client is focused */}
-            {interactive && !isSel && !isFocusedEdge && count > 1 && (
+            {/* Egress edge marker label (bows out to the right of both nodes) */}
+            {interactive && e.isEgress && !isSel && (
+              <text x={Math.max(fp.x, tp.x) + NODE_W + 30} y={(fp.y + tp.y) / 2 + NODE_H / 2}
+                textAnchor="middle" fill="rgba(167,139,250,.7)" fontSize="8" pointerEvents="none">
+                egress
+              </text>
+            )}
+
+            {/* Default labels — hidden when client is focused or on egress edges */}
+            {interactive && !isSel && !isFocusedEdge && !e.isEgress && count > 1 && (
               <text x={midX} y={midY} textAnchor="middle" fill="rgba(255,255,255,.45)" fontSize="9" pointerEvents="none">
                 {count} sessions
               </text>
             )}
-            {interactive && !isSel && !isFocusedEdge && count === 1 && e.setup_ms > 0 && (
+            {interactive && !isSel && !isFocusedEdge && !e.isEgress && count === 1 && e.setup_ms > 0 && (
               <text x={midX} y={midY} textAnchor="middle" fill="rgba(255,255,255,.3)" fontSize="9" pointerEvents="none">
                 net {e.net_id} · {e.setup_ms}ms
               </text>
             )}
 
-            {/* Focused-client edge labels */}
-            {isFocusedEdge && lp && (
+            {/* Focused-client edge labels (session edges only, not egress) */}
+            {isFocusedEdge && !e.isEgress && lp && (
               <g pointerEvents="none">
                 {srcIp && (
                   <g>

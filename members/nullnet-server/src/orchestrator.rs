@@ -31,6 +31,15 @@ struct EgressEdge {
     proxy_ip: IpAddr,
 }
 
+/// Read-only snapshot of a live egress edge, for topology rendering.
+#[derive(Debug, Clone)]
+pub(crate) struct EgressEdgeInfo {
+    pub(crate) net_id: u32,
+    pub(crate) initiator_ip: IpAddr,
+    pub(crate) initiator_docker: Option<String>,
+    pub(crate) proxy_ip: IpAddr,
+}
+
 #[derive(Debug, Clone)]
 pub struct Orchestrator {
     clients: Arc<RwLock<HashMap<IpAddr, OutboundStream>>>,
@@ -191,6 +200,23 @@ impl Orchestrator {
             edge.net_id = net_id;
         }
         Ok(true)
+    }
+
+    /// Snapshot the live egress edges (initiator replica -> proxy) for topology
+    /// rendering. Reservations that never completed (`net_id == 0`) are omitted.
+    pub(crate) async fn egress_edges_snapshot(&self) -> Vec<EgressEdgeInfo> {
+        self.egress_edges
+            .read()
+            .await
+            .values()
+            .filter(|e| e.net_id != 0)
+            .map(|e| EgressEdgeInfo {
+                net_id: e.net_id,
+                initiator_ip: e.initiator_ip,
+                initiator_docker: e.initiator_docker.clone(),
+                proxy_ip: e.proxy_ip,
+            })
+            .collect()
     }
 
     /// Tear down every egress edge anchored on `node_ip` (as initiator or proxy).

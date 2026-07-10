@@ -30,6 +30,7 @@ pub static EGRESS_GATEWAY: std::sync::LazyLock<bool> =
 ///   - `EGRESS_ALLOW_TCP_PORTS`  — TCP dsts the node may initiate to.
 ///   - `EGRESS_ALLOW_UDP_PORTS`  — UDP dsts the node may initiate to (e.g. DNS
 ///     `53`, NTP `123`). Replies come back via the CT map, no ingress entry needed.
+///
 /// ICMP is portless and always allowed (both directions). CT-tracked established
 /// returns and nullnet's own control/data plane are always allowed too.
 pub static INGRESS_ALLOW_TCP_PORTS: std::sync::LazyLock<Vec<u16>> =

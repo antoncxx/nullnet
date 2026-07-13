@@ -550,8 +550,14 @@ fn handle_vxlan_teardown(
 
     // remove DNAT before tearing the tunnel down so existing flows reset
     // cleanly. The `container_ip` matches the `-s` we used at install time.
+    // `remove_by_vxlan` also matches the egress steer's sentinel-port entry
+    // (EGRESS_TRIGGER_PORT = 0). That path installs a policy-route steer, not a
+    // DNAT — its teardown runs via EgressState below — so skip DNAT removal for
+    // it. Only real backend DNAT ports (>0) go through `dnat::remove`; otherwise
+    // we'd fire a bogus `iptables -D --dport 0` and a false removal-failed event.
     if let Some((_container, port, overlay_ip, container_ip)) =
         triggers_state.remove_by_vxlan(message.vxlan_id)
+        && port != crate::triggers::EGRESS_TRIGGER_PORT
         && !dnat::remove(port, overlay_ip, container_ip)
     {
         fire_event(

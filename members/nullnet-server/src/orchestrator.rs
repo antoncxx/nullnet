@@ -196,8 +196,24 @@ impl Orchestrator {
         }
 
         // Promote the reservation to a live edge with its allocated net_id.
-        if let Some(edge) = self.egress_edges.write().await.get_mut(&key) {
-            edge.net_id = net_id;
+        // If a concurrent teardown (container death / node disconnect) removed
+        // the reservation during the async build above, the slot is gone: reap
+        // the tunnel we just built and free the id, rather than leaking an
+        // orphaned edge that no map entry can ever reap.
+        let promoted = {
+            let mut edges = self.egress_edges.write().await;
+            match edges.get_mut(&key) {
+                Some(edge) => {
+                    edge.net_id = net_id;
+                    true
+                }
+                None => false,
+            }
+        };
+        if !promoted {
+            self.send_net_teardown(initiator_ip, initiator_docker, proxy_ip, None, net_id)
+                .await;
+            return Ok(false);
         }
         Ok(true)
     }

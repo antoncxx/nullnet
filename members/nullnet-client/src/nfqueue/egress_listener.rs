@@ -28,7 +28,7 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
 use tokio::time::timeout;
 
 const QUEUE_ID: u16 = 1;
@@ -46,6 +46,7 @@ struct EgressCtx {
     grpc: NullnetGrpcInterface,
     cache: BridgeIpCache,
     triggers_state: Arc<TriggersState>,
+    semaphore: Arc<Semaphore>,
 }
 
 /// Spawn the egress-trigger recv loop (queue 1). Shares the bridge-IP cache, the
@@ -59,6 +60,9 @@ pub fn spawn_egress_recv_thread(
         grpc,
         cache,
         triggers_state,
+        semaphore: Arc::new(Semaphore::new(
+            crate::nfqueue::listener::HANDLER_CONCURRENCY,
+        )),
     };
     spawn_queue_loop(
         QUEUE_ID,
@@ -72,6 +76,18 @@ pub fn spawn_egress_recv_thread(
 }
 
 async fn handle_packet(mut msg: Message, ctx: EgressCtx, verdict_tx: Sender<Message>) {
+    // Backpressure: cap concurrent in-flight handlers (mirrors the backend
+    // listener). A held egress packet can occupy a task for up to
+    // TRIGGER_TIMEOUT + STEER_TIMEOUT, so without this a container spraying new
+    // flows would fan out unbounded tasks and trigger RPCs.
+    let _permit = match ctx.semaphore.clone().acquire_owned().await {
+        Ok(p) => p,
+        Err(_) => {
+            msg.set_verdict(Verdict::Drop);
+            let _ = verdict_tx.send(msg);
+            return;
+        }
+    };
     // Parse before the async work so no borrow of `msg` is held across an await.
     let flow = ipv4_flow(msg.get_payload());
     let verdict = decide_verdict(&ctx, flow).await;

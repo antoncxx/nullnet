@@ -42,6 +42,16 @@ const INTERNAL_RANGES: [&str; 9] = [
 ];
 
 fn sudo(args: &[&str]) -> std::io::Result<std::process::ExitStatus> {
+    // For iptables, inject `-w` (wait for the xtables lock) right after the
+    // binary so concurrent per-edge VxlanSetup tasks don't fail on lock
+    // contention. Other commands (ip, sysctl) are passed through unchanged.
+    if args.first() == Some(&"iptables") {
+        let mut v: Vec<&str> = Vec::with_capacity(args.len() + 1);
+        v.push("iptables");
+        v.push("-w");
+        v.extend_from_slice(&args[1..]);
+        return Command::new("sudo").args(&v).status();
+    }
     Command::new("sudo").args(args).status()
 }
 
@@ -158,6 +168,18 @@ pub(crate) fn install_steer(
     snat_src: Ipv4Addr,
     container_ip: Ipv4Addr,
 ) -> bool {
+    // The 16-priority band (base..=base+15) MUST stay below main's rule (32766)
+    // or the catch-all lands above main and its default route wins — the steer
+    // silently never fires. net_id is bounded only by the (2M-wide) NET ID pool,
+    // so guard here and fail loud instead of installing rules that can't match.
+    if prio_base(net_id) + 15 >= 32_766 {
+        eprintln!(
+            "[egress] net_id {net_id} exceeds steer priority range (base {} >= main 32766); refusing steer",
+            prio_base(net_id)
+        );
+        return false;
+    }
+
     remove_steer(net_id, br_dev, snat_src, container_ip);
 
     let table = table_for(net_id).to_string();
@@ -224,6 +246,13 @@ pub(crate) fn install_steer(
         println!(
             "[egress] steer net {net_id}: {cip} -> via {proxy_gw} dev {br_dev} (snat {snat_src})"
         );
+    } else {
+        // Partial install (e.g. a transient failure mid-sequence): roll back
+        // whatever applied so we don't leak policy rules / SNAT for a net that
+        // may never be reused. Teardown otherwise keys on EgressState, which the
+        // caller only records on success.
+        eprintln!("[egress] steer net {net_id} partial install; rolling back");
+        remove_steer(net_id, br_dev, snat_src, container_ip);
     }
     ok
 }

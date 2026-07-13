@@ -1,4 +1,5 @@
 use crate::env::NET_TYPE;
+use crate::orchestrator::EgressEdgeInfo;
 use crate::services::clients::ClientInfo;
 use crate::services::input::StackMap;
 use crate::services::service_info::ServiceInfo;
@@ -197,9 +198,33 @@ struct GraphEdgeJson {
     to: String,
     net_id: u32,
     setup_ms: u128,
+    /// True for an outbound egress edge (initiator service -> gateway proxy).
+    /// Omitted from JSON when false to keep the inbound edge shape unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    egress: bool,
 }
 
-pub(crate) fn render_graph_json(services: &HashMap<String, ServiceInfo>) -> GraphJson {
+/// Resolve the registered service name owning the replica `(ip, docker)`.
+fn service_of_replica(
+    services: &HashMap<String, ServiceInfo>,
+    ip: IpAddr,
+    docker: Option<&str>,
+) -> Option<String> {
+    services.iter().find_map(|(name, info)| {
+        let ServiceInfo::Registered(reg) = info else {
+            return None;
+        };
+        reg.replicas()
+            .iter()
+            .any(|r| r.ip() == ip && r.docker_container() == docker)
+            .then(|| name.clone())
+    })
+}
+
+pub(crate) fn render_graph_json(
+    services: &HashMap<String, ServiceInfo>,
+    egress_edges: &[EgressEdgeInfo],
+) -> GraphJson {
     let initiators = initiators(services);
 
     let mut nodes: Vec<GraphNodeJson> = services
@@ -256,11 +281,32 @@ pub(crate) fn render_graph_json(services: &HashMap<String, ServiceInfo>) -> Grap
                     to: name.clone(),
                     net_id: ci.net_id(),
                     setup_ms: ci.time_ms(),
+                    egress: false,
                 })
             })
         })
         .collect();
     edges.sort_by(|a, b| a.from.cmp(&b.from).then(a.to.cmp(&b.to)));
+
+    // Outbound egress edges: initiator service -> gateway proxy. Resolved to the
+    // owning service name within this stack; edges whose initiator isn't part of
+    // this stack resolve to None and are skipped.
+    let mut egress: Vec<GraphEdgeJson> = egress_edges
+        .iter()
+        .filter_map(|e| {
+            let from = service_of_replica(services, e.initiator_ip, e.initiator_docker.as_deref())?;
+            Some(GraphEdgeJson {
+                from,
+                via_proxy: None,
+                to: e.proxy_ip.to_string(),
+                net_id: e.net_id,
+                setup_ms: 0,
+                egress: true,
+            })
+        })
+        .collect();
+    egress.sort_by(|a, b| a.from.cmp(&b.from).then(a.to.cmp(&b.to)));
+    edges.append(&mut egress);
 
     GraphJson { nodes, edges }
 }

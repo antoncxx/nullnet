@@ -6,6 +6,7 @@ use rtnetlink::{Handle, new_connection};
 use std::net::Ipv4Addr;
 
 pub(crate) mod dnat;
+pub(crate) mod egress;
 mod netlink;
 pub(crate) mod nfqueue;
 mod ovs;
@@ -64,6 +65,24 @@ pub(crate) async fn find_ethernet_ip(rtnetlink_handle: &RtNetLinkHandle) -> Opti
     netlink::find_ethernet_ip(&rtnetlink_handle.handle).await
 }
 
+/// Returns the name of the interface carrying `ip`, so the eBPF firewall can
+/// attach to the same NIC the forward socket binds to.
+pub(crate) fn find_ethernet_interface(ip: Ipv4Addr) -> Option<String> {
+    use network_interface::{NetworkInterface, NetworkInterfaceConfig};
+    use std::net::IpAddr;
+
+    NetworkInterface::show()
+        .ok()?
+        .into_iter()
+        .find_map(|iface| {
+            iface
+                .addr
+                .iter()
+                .any(|addr| matches!(addr.ip(), IpAddr::V4(v4) if v4 == ip))
+                .then_some(iface.name)
+        })
+}
+
 #[derive(Clone)]
 pub(crate) struct RtNetLinkHandle {
     handle: Handle,
@@ -86,6 +105,7 @@ impl RtNetLinkHandle {
 pub(crate) async fn cleanup_network(rtnetlink_handle: &RtNetLinkHandle) {
     dnat::init();
     nfqueue::init();
+    egress::init();
     install_mss_clamp();
     vxlan_cleanup_network();
     vlan_cleanup_network(rtnetlink_handle).await;

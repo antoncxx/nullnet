@@ -24,23 +24,30 @@ export default function EdgePanel({ edges }: Props) {
 
   if (edges.length === 0) return null;
   const first = edges[0];
+  const isEgress = !!first.egress;
 
   return (
     <>
       <div style={spRow}>
         <div style={spKey}>Type</div>
-        <span className={`badge ${first.via_proxy ? 'b-amber' : 'b-blue'}`}>
-          {first.via_proxy ? 'Proxied' : 'Direct'}
+        <span className={`badge ${isEgress ? 'b-purple' : first.via_proxy ? 'b-amber' : 'b-blue'}`}>
+          {isEgress ? 'Egress' : first.via_proxy ? 'Proxied' : 'Direct'}
         </span>
       </div>
       <div style={spRow}>
-        <div style={spKey}>From</div>
+        <div style={spKey}>{isEgress ? 'Service' : 'From'}</div>
         <div style={spCode}>{first.from}</div>
       </div>
       <div style={spRow}>
-        <div style={spKey}>To</div>
-        <div style={spCode}>{first.to}</div>
+        <div style={spKey}>{isEgress ? 'Gateway' : 'To'}</div>
+        <div style={isEgress ? { ...spCode, color: '#a78bfa' } : spCode}>{first.to}</div>
       </div>
+      {isEgress && (
+        <div style={spRow}>
+          <div style={spKey}>Destination</div>
+          <div style={spCode}>internet</div>
+        </div>
+      )}
       {first.via_proxy && (
         <div style={spRow}>
           <div style={spKey}>Via Proxy</div>
@@ -49,7 +56,7 @@ export default function EdgePanel({ edges }: Props) {
       )}
 
       <div style={{ marginTop: 16, marginBottom: 8, fontSize: 10, fontWeight: 600, color: 'var(--t2)', letterSpacing: '.08em' }}>
-        SESSIONS ({edges.length})
+        {isEgress ? `EGRESS EDGES (${edges.length})` : `SESSIONS (${edges.length})`}
       </div>
 
       {edges.map((e, i) => {
@@ -62,7 +69,7 @@ export default function EdgePanel({ edges }: Props) {
             padding: '9px 11px',
             marginBottom: 6,
           }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: session || e.via_proxy ? 6 : 0 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: session || e.via_proxy || e.egress ? 6 : 0 }}>
               <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 10, color: 'var(--cyan)' }}>
                 {e.via_proxy && chainByProxyNetId.has(e.net_id)
                   ? `nets ${chainByProxyNetId.get(e.net_id)!.join(', ')}`
@@ -72,6 +79,11 @@ export default function EdgePanel({ edges }: Props) {
                 <span style={{ fontSize: 10, color: 'var(--t2)' }}>{e.setup_ms}ms setup</span>
               )}
             </div>
+            {e.egress && (
+              <div style={{ fontSize: 10, color: '#a78bfa', fontFamily: "'JetBrains Mono',monospace" }}>
+                {e.from} → {e.to} → internet
+              </div>
+            )}
             {e.via_proxy && (
               <div style={{ fontSize: 10, color: '#fbbf24', fontFamily: "'JetBrains Mono',monospace", marginBottom: session ? 6 : 0 }}>
                 via {e.via_proxy}

@@ -96,6 +96,16 @@ pub struct VxlanSetup {
     /// initiator's traffic on that local port is steered into the new VXLAN.
     #[prost(uint32, optional, tag = "11")]
     pub dnat_port: ::core::option::Option<u32>,
+    /// Egress forward-proxy edge markers. Mutually exclusive with each other and
+    /// with dnat_port. Set on the initiator's edge: install policy-route + SNAT so
+    /// the service's external-bound traffic is steered into this VXLAN toward the
+    /// proxy (remote_ip) with the original destination preserved (no DNAT).
+    #[prost(bool, optional, tag = "12")]
+    pub egress_steer: ::core::option::Option<bool>,
+    /// Set on the gateway's edge: forward tunnelled external-bound packets to the
+    /// internet (kernel ip_forward + MASQUERADE); the Cilium egress-gateway model.
+    #[prost(bool, optional, tag = "13")]
+    pub egress_intercept: ::core::option::Option<bool>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct VxlanTeardown {
@@ -204,6 +214,25 @@ pub struct BackendTriggerRequest {
     #[prost(string, tag = "3")]
     pub initiator_container: ::prost::alloc::string::String,
 }
+/// Egress trigger — fired by the client on the first NEW flow from a registered
+/// service to an external (non-nullnet) destination. The server builds (or reuses)
+/// a single per-host egress VXLAN edge to the proxy; the destination is preserved
+/// in-band, so one edge serves all of that service's external destinations.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EgressTriggerRequest {
+    #[prost(string, tag = "1")]
+    pub service_name: ::prost::alloc::string::String,
+    /// Real Docker container name of the initiator replica. Empty for a host
+    /// process; disambiguates co-located replicas otherwise (as in BackendTrigger).
+    #[prost(string, tag = "2")]
+    pub initiator_container: ::prost::alloc::string::String,
+    /// Observed external destination — for logging / future policy only; the edge
+    /// itself is destination-agnostic.
+    #[prost(string, tag = "3")]
+    pub dst_ip: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "4")]
+    pub dst_port: u32,
+}
 /// A single TLS certificate, keyed by the SNI name it serves (exact, e.g.
 /// "color.com", or wildcard, e.g. "\*.color.com").
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -233,7 +262,7 @@ pub struct Empty {}
 pub struct AgentEvent {
     #[prost(
         oneof = "agent_event::Event",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 24, 25, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23, 26, 27, 28, 29, 22"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 24, 25, 30, 31, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23, 26, 27, 28, 29, 22"
     )]
     pub event: ::core::option::Option<agent_event::Event>,
 }
@@ -270,6 +299,10 @@ pub mod agent_event {
         ContainerSuspendFailed(super::AgentContainerSuspendFailed),
         #[prost(message, tag = "25")]
         ContainerResumeFailed(super::AgentContainerResumeFailed),
+        #[prost(message, tag = "30")]
+        EgressTriggerSendFailed(super::AgentEgressTriggerSendFailed),
+        #[prost(message, tag = "31")]
+        GatewayForwardInstallFailed(super::AgentGatewayForwardInstallFailed),
         /// Client info events
         #[prost(message, tag = "13")]
         VxlanSetupCompleted(super::AgentVxlanSetupCompleted),
@@ -407,6 +440,24 @@ pub struct AgentContainerResumeFailed {
     pub docker_container: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
     pub error_message: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AgentEgressTriggerSendFailed {
+    #[prost(string, tag = "1")]
+    pub service_name: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub dst_ip: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "3")]
+    pub dst_port: u32,
+    #[prost(string, tag = "4")]
+    pub error_message: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AgentGatewayForwardInstallFailed {
+    #[prost(uint32, tag = "1")]
+    pub vxlan_id: u32,
+    #[prost(string, tag = "2")]
+    pub br_net: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AgentVxlanSetupCompleted {
@@ -778,6 +829,29 @@ pub mod nullnet_grpc_client {
                 .insert(GrpcMethod::new("nullnet_grpc.NullnetGrpc", "BackendTrigger"));
             self.inner.unary(req, path, codec).await
         }
+        /// Egress trigger — for a registered service reaching the external internet,
+        /// brokered through the proxy's transparent forward listener.
+        pub async fn egress_trigger(
+            &mut self,
+            request: impl tonic::IntoRequest<super::EgressTriggerRequest>,
+        ) -> std::result::Result<tonic::Response<super::Empty>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nullnet_grpc.NullnetGrpc/EgressTrigger",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("nullnet_grpc.NullnetGrpc", "EgressTrigger"));
+            self.inner.unary(req, path, codec).await
+        }
         /// Report an event from a client or proxy agent back to the server.
         pub async fn report_event(
             &mut self,
@@ -910,6 +984,12 @@ pub mod nullnet_grpc_server {
         async fn backend_trigger(
             &self,
             request: tonic::Request<super::BackendTriggerRequest>,
+        ) -> std::result::Result<tonic::Response<super::Empty>, tonic::Status>;
+        /// Egress trigger — for a registered service reaching the external internet,
+        /// brokered through the proxy's transparent forward listener.
+        async fn egress_trigger(
+            &self,
+            request: tonic::Request<super::EgressTriggerRequest>,
         ) -> std::result::Result<tonic::Response<super::Empty>, tonic::Status>;
         /// Report an event from a client or proxy agent back to the server.
         async fn report_event(
@@ -1228,6 +1308,51 @@ pub mod nullnet_grpc_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = BackendTriggerSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nullnet_grpc.NullnetGrpc/EgressTrigger" => {
+                    #[allow(non_camel_case_types)]
+                    struct EgressTriggerSvc<T: NullnetGrpc>(pub Arc<T>);
+                    impl<
+                        T: NullnetGrpc,
+                    > tonic::server::UnaryService<super::EgressTriggerRequest>
+                    for EgressTriggerSvc<T> {
+                        type Response = super::Empty;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::EgressTriggerRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as NullnetGrpc>::egress_trigger(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = EgressTriggerSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

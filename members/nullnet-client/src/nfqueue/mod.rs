@@ -1,10 +1,13 @@
 mod cache;
+mod egress_listener;
 mod listener;
 mod parse;
+mod recv_loop;
 
 use crate::commands::nfqueue as rules;
 use crate::triggers::TriggersState;
 use cache::BridgeIpCache;
+use egress_listener::spawn_egress_recv_thread;
 use listener::{HANDLER_CONCURRENCY, ListenerCtx, spawn_recv_thread};
 use nullnet_grpc_lib::NullnetGrpcInterface;
 use std::collections::{HashMap, HashSet};
@@ -58,6 +61,10 @@ pub fn spawn_listener(
             consume_config(config_rx, port_to_service).await;
         });
     }
+
+    // Egress-trigger listener shares the bridge-IP cache, gRPC handle, and the
+    // trigger-lifecycle state (so it can hold a SYN until steering is installed).
+    spawn_egress_recv_thread(grpc.clone(), cache.clone(), triggers_state.clone());
 
     let ctx = ListenerCtx {
         grpc,

@@ -1,7 +1,9 @@
 #![allow(clippy::used_underscore_binding)]
 
 use crate::cli::Args;
-use crate::commands::{RtNetLinkHandle, cleanup_network, setup_br0};
+use crate::commands::{
+    RtNetLinkHandle, cleanup_network, find_ethernet_interface, find_ethernet_ip, setup_br0,
+};
 use crate::control_channel::control_channel;
 use crate::env::{CONTROL_SERVICE_ADDR, CONTROL_SERVICE_PORT};
 use crate::forward::receive::receive;
@@ -11,19 +13,15 @@ use crate::local_endpoints::LocalEndpoints;
 use crate::peers::peer::Peers;
 use crate::triggers::TriggersState;
 use clap::Parser;
-use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use nullnet_firewall::{DataLink, Firewall, FirewallError, LogLevel};
 use nullnet_grpc_lib::NullnetGrpcInterface;
 use nullnet_grpc_lib::nullnet_grpc::{
-    AgentEvent, AgentFirewallRulesLoadFailed, AgentServicesListUpdateFailed,
-    AgentServicesListUpdated, Net, Services, agent_event::Event as AgentEventKind,
+    AgentEvent, AgentServicesListUpdateFailed, AgentServicesListUpdated, Net, Services,
+    agent_event::Event as AgentEventKind,
 };
 use nullnet_liberror::{Error, ErrorHandler, Location, location};
 use std::collections::HashMap;
-use std::ops::Sub;
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::{panic, process};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{Notify, RwLock};
@@ -32,7 +30,8 @@ use tun_rs::{DeviceBuilder, Layer};
 mod cli;
 mod commands;
 mod control_channel;
-mod craft;
+mod ebpf;
+mod egress_state;
 mod env;
 mod forward;
 mod host_mappings;
@@ -64,11 +63,7 @@ async fn main() -> Result<(), Error> {
     }));
 
     // read CLI arguments
-    let Args {
-        firewall_path,
-        num_tasks,
-        ..
-    } = Args::parse();
+    let Args { num_tasks, .. } = Args::parse();
 
     // create a handle to execute netlink commands
     let rtnetlink_handle = RtNetLinkHandle::new()?;
@@ -80,13 +75,6 @@ async fn main() -> Result<(), Error> {
     let peers = Arc::new(RwLock::new(Peers::default()));
     let peers_2 = peers.clone();
 
-    // create firewall based on the defined rules
-    let mut firewall = Firewall::new();
-    firewall.log_level(LogLevel::Db);
-    firewall.data_link(DataLink::Ethernet);
-    let firewall_shared = Arc::new(RwLock::new(firewall));
-    set_firewall_rules(&firewall_shared, &firewall_path, true, None).await?;
-
     // initialize gRPC connection
     let grpc_server = grpc_init().await?;
     let grpc_server2 = grpc_server.clone();
@@ -95,11 +83,27 @@ async fn main() -> Result<(), Error> {
     let net_type = grpc_server.network_type().await.handle_err(location!())?;
 
     if net_type.net() == Net::Vlan {
-        setup_tap(num_tasks, peers, &firewall_shared, &rtnetlink_handle).await?;
+        setup_tap(num_tasks, peers, &rtnetlink_handle).await?;
         setup_br0(&rtnetlink_handle).await;
     }
 
     print_info(net_type.net());
+
+    // bring up the host-NIC eBPF default-deny firewall. Must happen before the
+    // control channel learns peers so its add()/remove() land in the PEERS map.
+    // Held alive for the whole run (drop = detach). Fails closed: any error
+    // aborts startup rather than running unprotected.
+    let ebpf_firewall = match setup_ebpf_firewall(&rtnetlink_handle).await {
+        Ok(fw) => {
+            println!("eBPF host firewall enabled (strict nullnet-only)");
+            fw
+        }
+        Err(e) => {
+            eprintln!("Failed to enable eBPF firewall: {e:?}");
+            process::exit(1);
+        }
+    };
+    let firewall_peers = ebpf_firewall.peers.clone();
 
     // shared dedup + waiter state, keyed by (initiator_container, port).
     // The NFQUEUE listener marks Pending and awaits the Notify; the control
@@ -110,6 +114,9 @@ async fn main() -> Result<(), Error> {
     // remember /etc/hosts entries installed at setup so teardown can undo them
     let host_mappings_state = Arc::new(HostMappingsState::default());
 
+    // remember egress plumbing installed at setup so teardown can reverse it
+    let egress_state = Arc::new(egress_state::EgressState::default());
+
     // listen on the gRPC control channel
     tokio::spawn(async move {
         if let Err(e) = control_channel(
@@ -118,6 +125,8 @@ async fn main() -> Result<(), Error> {
             rtnetlink_handle,
             triggers_state_cc,
             host_mappings_state,
+            firewall_peers,
+            egress_state,
         )
         .await
         {
@@ -152,23 +161,15 @@ async fn main() -> Result<(), Error> {
     );
 
     // declare services + push the port→service map to the NFQUEUE listener
-    // on each refresh. Clone the grpc handle: the original is still needed
-    // below for `set_firewall_rules`' event reporting.
-    let grpc_server_ds = grpc_server.clone();
+    // on each refresh.
     tokio::spawn(async move {
-        declare_services(grpc_server_ds, config_tx, docker_changed)
+        declare_services(grpc_server, config_tx, docker_changed)
             .await
             .expect("Failed to declare services");
     });
 
-    // watch the file defining rules and update the firewall accordingly
-    set_firewall_rules(
-        &firewall_shared,
-        &firewall_path,
-        false,
-        Some(grpc_server.clone()),
-    )
-    .await?;
+    // all work runs in the spawned tasks above; keep the process alive.
+    std::future::pending::<()>().await;
 
     Ok(())
 }
@@ -181,91 +182,67 @@ fn print_info(net: Net) {
     println!("{}\n", "=".repeat(40));
 }
 
-/// Loads and refreshes firewall rules whenever the corresponding file is updated.
-/// `grpc` is only used in the reload path (watch loop); initial load happens before gRPC is up.
-async fn set_firewall_rules(
-    firewall: &Arc<RwLock<Firewall>>,
-    firewall_path: &str,
-    is_init: bool,
-    grpc: Option<NullnetGrpcInterface>,
-) -> Result<(), Error> {
-    let print_info = |result: &Result<(), FirewallError>, is_init: bool| match result {
-        Err(err) => {
-            println!("{err}");
-            if is_init {
-                println!("Waiting for a valid firewall file...");
-            } else {
-                println!("Firewall was not updated!");
-            }
-        }
-        Ok(()) => {
-            if is_init {
-                println!("A valid firewall has been instantiated!");
-            } else {
-                println!("Firewall has been updated!");
-            }
-        }
-    };
-
-    if is_init {
-        let result = firewall.write().await.set_rules(firewall_path);
-        print_info(&result, is_init);
-        if result.is_ok() {
-            return Ok(());
-        }
+/// Resolve, attach, and return the host-NIC eBPF firewall. Fails closed: any
+/// problem (unresolvable server, missing NIC, load error) aborts startup rather
+/// than running unprotected.
+async fn setup_ebpf_firewall(rtnetlink_handle: &RtNetLinkHandle) -> Result<ebpf::Firewall, Error> {
+    let server_ip = resolve_server_ip()
+        .ok_or("could not resolve CONTROL_SERVICE_ADDR to an IPv4 address")
+        .handle_err(location!())?;
+    if server_ip.is_unspecified() {
+        return Err(
+            "CONTROL_SERVICE_ADDR is unspecified (0.0.0.0); refusing to enable the \
+                    firewall as it would block the control plane",
+        )
+        .handle_err(location!());
     }
 
-    let firewall_path_owned = firewall_path.to_string();
-    let mut firewall_directory = PathBuf::from(firewall_path);
-    firewall_directory.pop();
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    let mut watcher = RecommendedWatcher::new(tx, Config::default()).handle_err(location!())?;
-    watcher
-        .watch(&firewall_directory, RecursiveMode::Recursive)
+    let eth_ip = find_ethernet_ip(rtnetlink_handle)
+        .await
+        .ok_or("could not find the local ethernet IP")
+        .handle_err(location!())?;
+    let iface = find_ethernet_interface(eth_ip)
+        .ok_or("could not find the ethernet interface name")
         .handle_err(location!())?;
 
-    let mut last_update_time = Instant::now().sub(Duration::from_secs(60));
-
-    loop {
-        // only update rules if the event is related to a file change
-        if let Ok(Ok(Event {
-            kind: EventKind::Modify(_),
-            ..
-        })) = rx.recv()
-        {
-            // debounce duplicated events
-            if last_update_time.elapsed().as_millis() > 100 {
-                // ensure file changes are propagated
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                let result = firewall.write().await.set_rules(&firewall_path_owned);
-                print_info(&result, is_init);
-                if let Err(ref err) = result
-                    && let Some(ref g) = grpc
-                {
-                    let g = g.clone();
-                    let path = firewall_path_owned.clone();
-                    let error_message = err.to_string();
-                    tokio::spawn(async move {
-                        let _ = g
-                            .report_event(AgentEvent {
-                                event: Some(AgentEventKind::FirewallRulesLoadFailed(
-                                    AgentFirewallRulesLoadFailed {
-                                        path,
-                                        error_message,
-                                    },
-                                )),
-                            })
-                            .await;
-                    });
-                }
-                if result.is_ok() && is_init {
-                    return Ok(());
-                }
-                last_update_time = Instant::now();
-            }
-        }
+    let cfg = ebpf::FirewallConfig {
+        server_ip,
+        control_port: *CONTROL_SERVICE_PORT,
+        egress_gateway: *crate::env::EGRESS_GATEWAY,
+        ingress_tcp: crate::env::INGRESS_ALLOW_TCP_PORTS.clone(),
+        ingress_udp: crate::env::INGRESS_ALLOW_UDP_PORTS.clone(),
+        egress_tcp: crate::env::EGRESS_ALLOW_TCP_PORTS.clone(),
+        egress_udp: crate::env::EGRESS_ALLOW_UDP_PORTS.clone(),
+    };
+    if cfg.egress_gateway {
+        println!(
+            "Attaching eBPF firewall to {iface} in EGRESS-GATEWAY mode (stateful boundary: \
+             outbound allowed + tracked; inbound = established + allowlist \
+             tcp{:?} udp{:?}; ICMP always allowed)",
+            cfg.ingress_tcp, cfg.ingress_udp
+        );
+    } else {
+        println!(
+            "Attaching eBPF firewall to {iface} (stateful strict; control plane \
+             {server_ip}:{}; allow in tcp{:?} udp{:?}, out tcp{:?} udp{:?}; ICMP always allowed)",
+            cfg.control_port, cfg.ingress_tcp, cfg.ingress_udp, cfg.egress_tcp, cfg.egress_udp
+        );
     }
+    ebpf::enable(&iface, &cfg)
+}
+
+/// Resolve `CONTROL_SERVICE_ADDR:CONTROL_SERVICE_PORT` to its first IPv4.
+fn resolve_server_ip() -> Option<std::net::Ipv4Addr> {
+    use std::net::{IpAddr, ToSocketAddrs};
+    let host = CONTROL_SERVICE_ADDR.as_str();
+    let port = *CONTROL_SERVICE_PORT;
+    (host, port)
+        .to_socket_addrs()
+        .ok()?
+        .find_map(|sa| match sa.ip() {
+            IpAddr::V4(v4) => Some(v4),
+            IpAddr::V6(_) => None,
+        })
 }
 
 async fn grpc_init() -> Result<NullnetGrpcInterface, Error> {
@@ -439,7 +416,6 @@ async fn get_running_docker_containers() -> HashMap<String, Vec<String>> {
 async fn setup_tap(
     num_tasks: u8,
     peers: Arc<RwLock<Peers>>,
-    firewall_shared: &Arc<RwLock<Firewall>>,
     rtnetlink_handle: &RtNetLinkHandle,
 ) -> Result<(), Error> {
     // set up the local environment
@@ -464,18 +440,16 @@ async fn setup_tap(
         let reader = reader_shared.clone();
         let socket_1 = forward_socket.clone();
         let socket_2 = socket_1.clone();
-        let firewall_1 = firewall_shared.clone();
-        let firewall_2 = firewall_shared.clone();
         let peers_2 = peers.clone();
 
         // handle incoming traffic
         tokio::spawn(async move {
-            Box::pin(receive(&writer, &socket_1, &firewall_1)).await;
+            Box::pin(receive(&writer, &socket_1)).await;
         });
 
         // handle outgoing traffic
         tokio::spawn(async move {
-            Box::pin(send(&reader, &socket_2, &firewall_2, peers_2)).await;
+            Box::pin(send(&reader, &socket_2, peers_2)).await;
         });
     }
 

@@ -38,11 +38,17 @@ The repository should be cloned under `/root` so the provided `setup-*.sh` scrip
   ```
   NET_TYPE=VXLAN
   CERT_ENCRYPTION_KEY=<32 raw bytes or 64 hex chars>
+  PROXY_IP=192.168.1.100
   ```
   `CERT_ENCRYPTION_KEY` is **required** — the server refuses to start without it. It encrypts
   TLS certificate private keys (and the DNS-provider credentials of ACME-issued certs) at rest;
   keep it stable, since rotating it makes existing encrypted data undecryptable. Generate one with
   `openssl rand -hex 32`.
+
+  `PROXY_IP` is the IP of the host running `nullnet-proxy` (the egress gateway). It is **required to
+  enable egress brokering**: when a registered service reaches out to the internet the server builds
+  a per-initiator egress edge to this host. If unset, egress is disabled (the trigger is rejected
+  with "PROXY_IP is not configured") — ingress still works.
 
 - TLS certificates are issued from Let's Encrypt via a DNS-01 challenge (UI: *Certificates* page).
   Each cert stores its DNS-provider credentials encrypted at rest and is **renewed automatically**
@@ -137,12 +143,30 @@ The repository should be cloned under `/root` so the provided `setup-*.sh` scrip
 ### nullnet-client
 
 - set environment variables (in `members/nullnet-client/.env`; set `CONTROL_SERVICE_ADDR` to the IP
-  of `nullnet-server`, `ETH_NAME` to the ethernet interface to monitor)
+  of `nullnet-server`). The uplink interface is auto-detected from the host's default route.
   ```
   CONTROL_SERVICE_ADDR=192.168.1.100
   CONTROL_SERVICE_PORT=50051
-  ETH_NAME=ens18
+  INGRESS_ALLOW_TCP_PORTS=22,8080   # inbound TCP listeners
+  INGRESS_ALLOW_UDP_PORTS=          # inbound UDP listeners (e.g. Swarm gossip 7946)
+  EGRESS_ALLOW_TCP_PORTS=           # outbound TCP dsts (e.g. 80,443 for updates)
+  EGRESS_ALLOW_UDP_PORTS=53,123     # outbound UDP dsts (DNS, NTP)
+  EGRESS_GATEWAY=true               # only on the host that runs nullnet-proxy
   ```
+
+  > **⚠️ The client attaches a default-deny eBPF firewall to the uplink NIC on startup.** It permits
+  > only the nullnet control plane (gRPC to the server), data plane (VXLAN to peers), established
+  > returns, ICMP (always, both directions — echo + PMTUD), and whatever you list in the four
+  > `{INGRESS,EGRESS}_ALLOW_{TCP,UDP}_PORTS` variables (matched on destination port). **Put `22` in
+  > `INGRESS_ALLOW_TCP_PORTS`** or you will lose SSH the moment the client starts — enabling it over an
+  > SSH session with `22` missing kills the session. A host that needs name resolution / time sync needs
+  > `EGRESS_ALLOW_UDP_PORTS=53,123`; DHCP renewal needs `67` (and inbound `68` for broadcast replies).
+
+  `EGRESS_GATEWAY=true` is set **only on the gateway host** (the one running `nullnet-proxy`). It
+  switches that node's firewall to gateway posture — all outbound is allowed (and tracked) and it
+  forwards brokered egress to the internet; inbound still obeys the allowlist, so list `80,443`
+  (and `22`) in `INGRESS_ALLOW_TCP_PORTS` there. Every other (strict) node obeys the allowlist in
+  both directions.
 
 - service configuration must be stored at `members/nullnet-client/services.toml`. Each entry
   must declare its `stack` (which must match a `services/<stack>.toml` on the server, otherwise

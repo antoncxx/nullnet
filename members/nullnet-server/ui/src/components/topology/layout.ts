@@ -4,8 +4,12 @@ import type { Pos, TopoNode, TopoEdge } from './types';
 
 export function buildTopoGraph(graph: GraphJson): { nodes: TopoNode[]; edges: TopoEdge[] } {
   const nodes: TopoNode[] = graph.nodes.map(n => ({ ...n, kind: 'service' as const }));
+  // Proxy nodes come from both inbound (via_proxy) and outbound egress (to).
   const proxyIps = new Set<string>();
-  for (const e of graph.edges) { if (e.via_proxy) proxyIps.add(e.via_proxy); }
+  for (const e of graph.edges) {
+    if (e.via_proxy) proxyIps.add(e.via_proxy);
+    if (e.egress) proxyIps.add(e.to);
+  }
   for (const ip of proxyIps) nodes.push({ kind: 'proxy', id: ip });
 
   // Internet node — added whenever there are proxy nodes
@@ -15,34 +19,43 @@ export function buildTopoGraph(graph: GraphJson): { nodes: TopoNode[]; edges: To
 
   const inetEdges: TopoEdge[] = [];
   for (const ip of proxyIps) {
-    inetEdges.push({ from: INTERNET_ID, to: ip, net_id: -1, setup_ms: 0, isProxyHop: false, isInternetEdge: true, originalIndices: [] });
+    inetEdges.push({ from: INTERNET_ID, to: ip, net_id: -1, setup_ms: 0, isProxyHop: false, isInternetEdge: true, isEgress: false, originalIndices: [] });
   }
 
   // De-duplicate service/proxy edges by (from, to) key — multiple sessions share one drawn edge.
+  // Egress edges are kept in a separate map so they never merge with an inbound
+  // proxy hop that happens to share a (from, to) pair but runs the opposite way.
   const edgeMap = new Map<string, TopoEdge>();
+  const egressMap = new Map<string, TopoEdge>();
   for (let idx = 0; idx < graph.edges.length; idx++) {
     const e = graph.edges[idx];
-    if (e.via_proxy) {
+    if (e.egress) {
+      const k = `${e.from}\0${e.to}`;
+      if (!egressMap.has(k)) {
+        egressMap.set(k, { from: e.from, to: e.to, net_id: e.net_id, setup_ms: e.setup_ms, isProxyHop: false, isInternetEdge: false, isEgress: true, originalIndices: [] });
+      }
+      egressMap.get(k)!.originalIndices.push(idx);
+    } else if (e.via_proxy) {
       const k1 = `${e.from}\0${e.via_proxy}`;
       if (!edgeMap.has(k1)) {
-        edgeMap.set(k1, { from: e.from, to: e.via_proxy, net_id: e.net_id, setup_ms: 0, isProxyHop: true, isInternetEdge: false, originalIndices: [] });
+        edgeMap.set(k1, { from: e.from, to: e.via_proxy, net_id: e.net_id, setup_ms: 0, isProxyHop: true, isInternetEdge: false, isEgress: false, originalIndices: [] });
       }
       edgeMap.get(k1)!.originalIndices.push(idx);
 
       const k2 = `${e.via_proxy}\0${e.to}`;
       if (!edgeMap.has(k2)) {
-        edgeMap.set(k2, { from: e.via_proxy, to: e.to, net_id: e.net_id, setup_ms: e.setup_ms, isProxyHop: true, isInternetEdge: false, originalIndices: [] });
+        edgeMap.set(k2, { from: e.via_proxy, to: e.to, net_id: e.net_id, setup_ms: e.setup_ms, isProxyHop: true, isInternetEdge: false, isEgress: false, originalIndices: [] });
       }
       edgeMap.get(k2)!.originalIndices.push(idx);
     } else {
       const k = `${e.from}\0${e.to}`;
       if (!edgeMap.has(k)) {
-        edgeMap.set(k, { from: e.from, to: e.to, net_id: e.net_id, setup_ms: e.setup_ms, isProxyHop: false, isInternetEdge: false, originalIndices: [] });
+        edgeMap.set(k, { from: e.from, to: e.to, net_id: e.net_id, setup_ms: e.setup_ms, isProxyHop: false, isInternetEdge: false, isEgress: false, originalIndices: [] });
       }
       edgeMap.get(k)!.originalIndices.push(idx);
     }
   }
-  return { nodes, edges: [...inetEdges, ...edgeMap.values()] };
+  return { nodes, edges: [...inetEdges, ...edgeMap.values(), ...egressMap.values()] };
 }
 
 export function layoutNodes(nodes: TopoNode[], edges: TopoEdge[]): Map<string, Pos> {
@@ -191,4 +204,16 @@ export function inetEdgePath(from: Pos, to: Pos): string {
   const y2 = to.y;
   const cy = (y1 + y2) / 2;
   return `M ${x1} ${y1} C ${x1} ${cy}, ${x2} ${cy}, ${x2} ${y2}`;
+}
+
+// Egress edge (initiator service → gateway proxy). Both ends attach on the node's
+// RIGHT face and the curve bows further right, so it never sits on top of the
+// (vertically routed) inbound proxy edge between the same two nodes. The arrow
+// lands on the proxy end.
+const EGRESS_BOW = 46;
+export function egressEdgePath(from: Pos, to: Pos): string {
+  const x1 = from.x + NODE_W, y1 = from.y + NODE_H / 2;
+  const x2 = to.x + NODE_W, y2 = to.y + NODE_H / 2;
+  const bowX = Math.max(x1, x2) + EGRESS_BOW;
+  return `M ${x1} ${y1} C ${bowX} ${y1}, ${bowX} ${y2}, ${x2} ${y2}`;
 }

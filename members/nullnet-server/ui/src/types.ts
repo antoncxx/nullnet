@@ -90,6 +90,8 @@ export type EventJson =
   | WithSeverity & { type: 'control_channel_ack_failed'; msg_id: string; message_type: string }
   | WithSeverity & { type: 'services_list_update_failed'; error_message: string; num_services: number }
   | WithSeverity & { type: 'backend_trigger_send_failed'; service_name: string; port: number; error_message: string }
+  | WithSeverity & { type: 'egress_trigger_send_failed'; service_name: string; dst_ip: string; dst_port: number; error_message: string }
+  | WithSeverity & { type: 'gateway_forward_install_failed'; vxlan_id: number; br_net: string }
   | WithSeverity & { type: 'firewall_rules_load_failed'; path: string; error_message: string }
   | WithSeverity & { type: 'container_suspend_failed'; docker_container: string; error_message: string }
   | WithSeverity & { type: 'container_resume_failed'; docker_container: string; error_message: string }
@@ -127,6 +129,8 @@ export interface GraphEdgeJson {
   to: string;
   net_id: number;
   setup_ms: number;
+  /** Outbound egress edge: initiator service → gateway proxy. */
+  egress?: boolean;
 }
 
 export interface GraphJson {

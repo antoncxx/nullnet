@@ -43,6 +43,8 @@ const KIND_LABELS: Record<string, string> = {
   control_channel_ack_failed: 'control_channel_ack_failed',
   services_list_update_failed: 'services_list_update_failed',
   backend_trigger_send_failed: 'backend_trigger_send_failed',
+  egress_trigger_send_failed: 'egress_trigger_send_failed',
+  gateway_forward_install_failed: 'gateway_forward_install_failed',
   firewall_rules_load_failed: 'firewall_rules_load_failed',
   container_suspend_failed: 'container_suspend_failed',
   container_resume_failed: 'container_resume_failed',
@@ -57,8 +59,13 @@ const KIND_LABELS: Record<string, string> = {
   proxy_request_invalid_host: 'proxy_request_invalid_host',
   upstream_ip_parse_failed: 'upstream_ip_parse_failed',
   proxy_client_not_inet: 'proxy_client_not_inet',
+  tls_certificate_invalid: 'tls_certificate_invalid',
   // Proxy info
   proxy_request_routed: 'proxy_request_routed',
+  // Certificate
+  certificate_installed: 'certificate_installed',
+  certificate_renewed: 'certificate_renewed',
+  certificate_removed: 'certificate_removed',
 };
 
 const ALL_KINDS = Object.keys(KIND_LABELS);
@@ -122,6 +129,10 @@ function eventDetail(e: EventJson): string {
       return `${e.num_services} services · ${e.error_message}`;
     case 'backend_trigger_send_failed':
       return `${e.service_name} · port ${e.port} · ${e.error_message}`;
+    case 'egress_trigger_send_failed':
+      return `${e.service_name} → ${e.dst_ip}:${e.dst_port} · ${e.error_message}`;
+    case 'gateway_forward_install_failed':
+      return `vxlan ${e.vxlan_id} · ${e.br_net}`;
     case 'firewall_rules_load_failed':
       return `${e.path} · ${e.error_message}`;
     case 'container_suspend_failed':

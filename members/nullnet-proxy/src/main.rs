@@ -258,6 +258,10 @@ async fn main() -> Result<(), nullnet_liberror::Error> {
         tokio::spawn(async move { watch_certificates(server, store).await });
     }
 
+    // Egress is handled by the co-located nullnet-client's kernel forwarding
+    // (ip_forward + MASQUERADE, the Cilium egress-gateway model), not by a
+    // userspace forward proxy here. See docs/egress-gateway-cilium-model.md.
+
     // subscribe to the live TCP/UDP port→service table and keep raw listeners
     // in sync with it for the lifetime of the process
     tokio::spawn(port_mappings::watch_and_serve(nullnet_proxy.clone()));

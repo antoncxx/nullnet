@@ -18,6 +18,27 @@ pub fn ipv4_src_and_dst_port(packet: &[u8]) -> Option<(Ipv4Addr, u16)> {
     Some((Ipv4Addr::from(src_octets), dst_port))
 }
 
+/// Like [`ipv4_src_and_dst_port`] but also returns the destination IP. Used by
+/// the egress listener, which classifies flows by destination (external vs
+/// internal) rather than by port.
+pub fn ipv4_flow(packet: &[u8]) -> Option<(Ipv4Addr, Ipv4Addr, u16)> {
+    let headers = LaxPacketHeaders::from_ip(packet).ok()?;
+    let (src_octets, dst_octets) = match headers.net? {
+        NetHeaders::Ipv4(ipv4, _) => (ipv4.source, ipv4.destination),
+        _ => return None,
+    };
+    let dst_port = match headers.transport? {
+        TransportHeader::Tcp(tcp) => tcp.destination_port,
+        TransportHeader::Udp(udp) => udp.destination_port,
+        _ => return None,
+    };
+    Some((
+        Ipv4Addr::from(src_octets),
+        Ipv4Addr::from(dst_octets),
+        dst_port,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

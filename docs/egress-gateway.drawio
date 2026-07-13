@@ -1,0 +1,89 @@
+<mxfile host="Electron" agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/28.0.6 Chrome/138.0.7204.100 Electron/37.2.3 Safari/537.36" version="28.0.6">
+  <diagram name="egress-gateway" id="egress-gateway-1">
+    <mxGraphModel dx="1464" dy="827" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1300" pageHeight="620" background="#1E1E1E" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="Egress — Cilium gateway model" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontColor=#FFFFFF;fontSize=18;fontStyle=1" parent="1" vertex="1">
+          <mxGeometry x="40" y="12" width="880" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="server" value="nullnet-server (control plane)&#xa;builds the egress edge → PROXY_IP" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#3949AB;strokeColor=#9FA8DA;fontColor=#FFFFFF;fontSize=12;fontStyle=1" parent="1" vertex="1">
+          <mxGeometry x="400" y="60" width="300" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="hs" value="Initiator node (Hs) — strict, stateful firewall" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#4FC3F7;fontColor=#4FC3F7;dashed=1;verticalAlign=top;fontSize=13;fontStyle=1;dashPattern=6 6" parent="1" vertex="1">
+          <mxGeometry x="40" y="200" width="360" height="330" as="geometry" />
+        </mxCell>
+        <mxCell id="svc" value="Service container&#xa;connects to 1.2.3.4:443" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1E88E5;strokeColor=#90CAF9;fontColor=#FFFFFF;fontSize=12;fontStyle=1" parent="1" vertex="1">
+          <mxGeometry x="70" y="245" width="300" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="steer" value="Steer into tunnel&#xa;ip rule + SNAT#1 (src → Hs overlay IP)&#xa;destination preserved (no DNAT)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#00897B;strokeColor=#4DB6AC;fontColor=#FFFFFF;fontSize=12;fontStyle=1" parent="1" vertex="1">
+          <mxGeometry x="70" y="345" width="300" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="hsfw" value="eBPF firewall: real NIC only sees VXLAN→peer (allowed)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#6A1B9A;strokeColor=#CE93D8;fontColor=#FFFFFF;fontSize=11" parent="1" vertex="1">
+          <mxGeometry x="70" y="460" width="300" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="hp" value="Gateway node (Hp) — EGRESS_GATEWAY=true&#xa;(also runs nullnet-proxy for ingress)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#FFB74D;fontColor=#FFB74D;dashed=1;verticalAlign=top;fontSize=13;fontStyle=1;dashPattern=6 6" parent="1" vertex="1">
+          <mxGeometry x="560" y="200" width="400" height="330" as="geometry" />
+        </mxCell>
+        <mxCell id="decap" value="VXLAN decap + route&#xa;inner dst still 1.2.3.4 (not local) → forward" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#00838F;strokeColor=#4DD0E1;fontColor=#FFFFFF;fontSize=12;fontStyle=1" parent="1" vertex="1">
+          <mxGeometry x="590" y="250" width="340" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="masq" value="MASQUERADE (SNAT#2) → Hp public IP&#xa;+ stateful eBPF firewall: allow outbound,&#xa;CT tracks the flow so the reply is allowed back" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#C62828;strokeColor=#EF9A9A;fontColor=#FFFFFF;fontSize=12;fontStyle=1" parent="1" vertex="1">
+          <mxGeometry x="590" y="360" width="340" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="net" value="Internet&#xa;1.2.3.4:443" style="shape=cloud;whiteSpace=wrap;html=1;fillColor=#FDD835;strokeColor=#FFF59D;fontColor=#212121;fontSize=13;fontStyle=1" parent="1" vertex="1">
+          <mxGeometry x="1040" y="300" width="200" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" value="① first packet →&#xa;EgressTrigger (gRPC)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#90A4AE;fontColor=#ECEFF1;dashed=1;endArrow=block;fontSize=11;labelBackgroundColor=#263238" parent="1" source="svc" target="server" edge="1">
+          <mxGeometry x="-0.3254" y="26" relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="539" y="275" />
+            </Array>
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e2a" value="② build edge" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#90A4AE;fontColor=#ECEFF1;dashed=1;endArrow=block;fontSize=11;labelBackgroundColor=#263238" parent="1" source="server" target="hs" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2b" value="② build edge" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#90A4AE;fontColor=#ECEFF1;dashed=1;endArrow=block;fontSize=11;labelBackgroundColor=#263238" parent="1" source="server" target="hp" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="d0" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#66BB6A;endArrow=block;strokeWidth=2" parent="1" source="svc" target="steer" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="d1" value="③ VXLAN tunnel (UDP 4789)&#xa;inner dst 1.2.3.4 kept" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#66BB6A;fontColor=#C8E6C9;endArrow=block;strokeWidth=2;fontSize=11;labelBackgroundColor=#263238;exitX=1;exitY=0.5;entryX=-0.003;entryY=0.657;entryDx=0;entryDy=0;entryPerimeter=0;" parent="1" source="steer" target="decap" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="d2" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#66BB6A;endArrow=block;strokeWidth=2" parent="1" source="decap" target="masq" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="d3" value="④ out the real NIC&#xa;(src → Hp public IP)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#66BB6A;fontColor=#C8E6C9;endArrow=block;strokeWidth=2;fontSize=11;labelBackgroundColor=#263238;exitX=1;exitY=0.5;entryX=0;entryY=0.5" parent="1" source="masq" target="net" edge="1">
+          <mxGeometry x="0.3086" y="12" relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="985" y="409" />
+              <mxPoint x="985" y="360" />
+            </Array>
+            <mxPoint x="-12" y="10" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="r1" value="⑤ reply is addressed to Hp public IP&lt;br&gt;→ firewall CT allows → de-SNAT #2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#FFCA28;fontColor=#FFE082;dashed=1;endArrow=block;strokeWidth=2;fontSize=11;labelBackgroundColor=#263238;exitX=0;exitY=0.75;entryX=1;entryY=0.75" parent="1" source="net" target="masq" edge="1">
+          <mxGeometry x="-0.136" y="45" relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1018" y="390" />
+              <mxPoint x="1018" y="435" />
+            </Array>
+            <mxPoint x="40" y="-25" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="r2" value="⑥ back through the VXLAN tunnel → Hs de-SNAT #1 → delivered to the container" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#FFCA28;fontColor=#FFE082;dashed=1;endArrow=block;strokeWidth=2;fontSize=11;labelBackgroundColor=#263238;exitX=0.5;exitY=1;entryX=0.5;entryY=1" edge="1" parent="1" source="masq" target="svc">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="760" y="575" />
+              <mxPoint x="220" y="575" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

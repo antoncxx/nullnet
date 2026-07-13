@@ -12,9 +12,9 @@ use crate::services::service_info::{ServiceInfo, backend_involved_services};
 use crate::timeout::check_timeouts;
 use nullnet_grpc_lib::nullnet_grpc::nullnet_grpc_server::NullnetGrpc;
 use nullnet_grpc_lib::nullnet_grpc::{
-    AgentEvent, BackendTriggerRequest, CertBundle, Empty, MsgId, NetMessage, NetType, PortMapping,
-    PortMappingBundle, ProxyRequest, ServiceTrigger, Services, ServicesListResponse, Upstream,
-    agent_event::Event as AgentEventKind,
+    AgentEvent, BackendTriggerRequest, CertBundle, Empty, MsgId, Net, NetMessage, NetType,
+    PortMapping, PortMappingBundle, ProxyRequest, ServiceTrigger, Services, ServicesListResponse,
+    Upstream, agent_event::Event as AgentEventKind,
 };
 use nullnet_liberror::{Error, ErrorHandler, Location, location};
 use std::collections::{HashMap, HashSet};
@@ -323,15 +323,41 @@ impl NullnetGrpcImpl {
             sender_ip, req.services
         );
 
-        // Reject entries with empty stack; partition the rest by stack.
+        // Skip malformed/unsupported entries per-entry (emitting a warning
+        // event so the UI surfaces it) rather than failing the whole batch —
+        // one bad entry must not stop a node's valid services from registering.
         let mut service_list_by_stack: HashMap<String, Vec<(String, u16, Option<String>)>> =
             HashMap::new();
         for s in req.services {
+            let skip = |reason: String| {
+                Event::service_declaration_skipped(sender_ip.to_string(), s.name.clone(), reason)
+            };
             if s.stack.is_empty() {
-                Err("Service declaration missing required 'stack' field")
-                    .handle_err(location!())?;
+                self.orchestrator
+                    .events
+                    .emit(skip("missing required 'stack' field".to_string()))
+                    .await;
+                continue;
             }
-            let port = u16::try_from(s.port).handle_err(location!())?;
+            // Docker services can only be wired into an overlay via VXLAN (the
+            // container's netns is plumbed by vxlan-setup); VLAN setup only puts
+            // a veth IP on the host.
+            if *NET_TYPE == Net::Vlan && s.docker_container.is_some() {
+                self.orchestrator
+                    .events
+                    .emit(skip(
+                        "Docker services require VXLAN network type".to_string(),
+                    ))
+                    .await;
+                continue;
+            }
+            let Ok(port) = u16::try_from(s.port) else {
+                self.orchestrator
+                    .events
+                    .emit(skip(format!("port {} out of range", s.port)))
+                    .await;
+                continue;
+            };
             service_list_by_stack.entry(s.stack).or_default().push((
                 s.name,
                 port,

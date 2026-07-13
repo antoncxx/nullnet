@@ -50,6 +50,12 @@ pub(crate) enum Event {
         stack: String,
         timestamp: u64,
     },
+    ServiceDeclarationSkipped {
+        node: String,
+        service: String,
+        reason: String,
+        timestamp: u64,
+    },
     SetupStarted {
         net_id: u32,
         service: String,
@@ -320,6 +326,7 @@ impl Event {
             Self::NodeDisconnected { .. } => "node_disconnected",
             Self::ServiceRegistered { .. } => "service_registered",
             Self::ServiceUnregistered { .. } => "service_unregistered",
+            Self::ServiceDeclarationSkipped { .. } => "service_declaration_skipped",
             Self::SetupStarted { .. } => "setup_started",
             Self::SetupAck { .. } => "setup_ack",
             Self::SetupTimeout { .. } => "setup_timeout",
@@ -391,6 +398,7 @@ impl Event {
 
             Self::NodeDisconnected { .. }
             | Self::ServiceUnregistered { .. }
+            | Self::ServiceDeclarationSkipped { .. }
             | Self::ConfigStackRemoved { .. }
             | Self::AllReplicasRemoved { .. }
             | Self::ServiceReachabilityToggled { .. }
@@ -433,6 +441,19 @@ impl Event {
     pub(crate) fn node_connected(ip: String) -> Self {
         Self::NodeConnected {
             ip,
+            timestamp: now_secs(),
+        }
+    }
+
+    pub(crate) fn service_declaration_skipped(
+        node: String,
+        service: String,
+        reason: String,
+    ) -> Self {
+        Self::ServiceDeclarationSkipped {
+            node,
+            service,
+            reason,
             timestamp: now_secs(),
         }
     }

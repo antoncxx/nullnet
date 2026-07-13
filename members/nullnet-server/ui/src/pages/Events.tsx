@@ -15,6 +15,7 @@ const KIND_LABELS: Record<string, string> = {
   node_disconnected: 'node_disconnected',
   service_registered: 'service_registered',
   service_unregistered: 'service_unregistered',
+  service_declaration_skipped: 'service_declaration_skipped',
   setup_started: 'setup_started',
   setup_ack: 'setup_ack',
   setup_timeout: 'setup_timeout',
@@ -70,6 +71,8 @@ function eventDetail(e: EventJson): string {
     case 'service_registered':
     case 'service_unregistered':
       return `${e.name} · ${e.stack}`;
+    case 'service_declaration_skipped':
+      return `${e.service} · ${e.node} · ${e.reason}`;
     case 'setup_started':
       return `net ${e.net_id} · ${e.service} ← ${e.client_ip}`;
     case 'setup_ack':

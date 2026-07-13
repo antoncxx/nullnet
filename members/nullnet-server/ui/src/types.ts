@@ -62,6 +62,7 @@ export type EventJson =
   | WithSeverity & { type: 'node_disconnected'; ip: string }
   | WithSeverity & { type: 'service_registered'; name: string; stack: string }
   | WithSeverity & { type: 'service_unregistered'; name: string; stack: string }
+  | WithSeverity & { type: 'service_declaration_skipped'; node: string; service: string; reason: string }
   | WithSeverity & { type: 'setup_started'; net_id: number; service: string; client_ip: string }
   | WithSeverity & { type: 'setup_ack'; net_id: number; service: string; latency_ms: number }
   | WithSeverity & { type: 'setup_timeout'; net_id: number; service: string }

@@ -387,9 +387,10 @@ async fn handle_vxlan_setup(
     // nullnet-server's `UdpPortPool`), so without this every packet on a real
     // tunnel — cross-host VXLAN encapsulation, including the overlay ARP that
     // has to succeed before any TCP connection can be routed — is silently
-    // dropped at this host's NIC.
+    // dropped at this host's NIC. Paired with `remote_ip` specifically, so a
+    // different concurrent tunnel's peer can't satisfy this port.
     if let Ok(dstport) = u16::try_from(message.dstport) {
-        firewall_vxlan_ports.add(vxlan_id, dstport);
+        firewall_vxlan_ports.add(vxlan_id, dstport, remote_ip);
     }
 
     // setup VXLAN on this machine (optionally attaching a Docker container)

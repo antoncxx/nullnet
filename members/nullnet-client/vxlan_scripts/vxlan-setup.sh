@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # Read CLI arguments:
-if [ "$#" -lt 9 ] || [ "$#" -gt 10 ]; then
-    echo "Usage: $0 <vxlan_id> <ns_name> <ns_net> <br_name> <br_net> <local_ip> <remote_ip> <key_hex> <dstport> [docker_container]"
-    echo "Example (standalone): $0 100 ns_100_s 10.0.0.1/29 br_100_s 10.0.0.2/29 192.168.1.102 192.168.1.104 <64 hex chars> 20100"
-    echo "Example (docker):     $0 100 ns_100_s 10.0.0.1/29 br_100_s 10.0.0.2/29 192.168.1.102 192.168.1.104 <64 hex chars> 20100 my_container"
+if [ "$#" -lt 10 ] || [ "$#" -gt 11 ]; then
+    echo "Usage: $0 <vxlan_id> <ns_name> <ns_net> <br_name> <br_net> <local_ip> <remote_ip> <key_hex> <dstport> <encrypted:true|false> [docker_container]"
+    echo "Example (standalone): $0 100 ns_100_s 10.0.0.1/29 br_100_s 10.0.0.2/29 192.168.1.102 192.168.1.104 <64 hex chars> 20100 true"
+    echo "Example (docker):     $0 100 ns_100_s 10.0.0.1/29 br_100_s 10.0.0.2/29 192.168.1.102 192.168.1.104 <64 hex chars> 20100 true my_container"
     exit 1
 fi
 
@@ -17,7 +17,8 @@ LOCAL_IP=$6
 REMOTE_IP=$7
 KEY_HEX=$8
 DSTPORT=$9
-DOCKER_CONTAINER=${10}
+ENCRYPTED=${10}
+DOCKER_CONTAINER=${11}
 
 BR_IP=$(echo $BR_NET | cut -d'/' -f1)
 
@@ -91,34 +92,43 @@ if [ "$LOCAL_IP" == "$REMOTE_IP" ]; then
           MACSEC_IF="macsec-${VXLAN_ID}-c"
       fi
 
-      # The peer's MAC is available immediately: `ip link add ... peer name
-      # ...` creates both ends atomically in one kernel call, whether this
-      # invocation won the race above or lost it to the sibling script.
-      PEER_MAC=$(cat /sys/class/net/$PEER_VETH/address)
-      KEY_ID=$(printf '%032x' $VXLAN_ID)
+      if [ "$ENCRYPTED" == "true" ]; then
+          # The peer's MAC is available immediately: `ip link add ... peer
+          # name ...` creates both ends atomically in one kernel call,
+          # whether this invocation won the race above or lost it to the
+          # sibling script.
+          PEER_MAC=$(cat /sys/class/net/$PEER_VETH/address)
+          KEY_ID=$(printf '%032x' $VXLAN_ID)
 
-      # MACsec adds up to 32 bytes of overhead (SecTAG + ICV for GCM-AES-256).
-      # Give the underlying veth the extra room — it's a virtual, host-only
-      # link with no physical MTU constraint — so the macsec interface on
-      # top of it can still carry a full OVERLAY_MTU-sized frame.
-      sudo ip link set "$LOCAL_VETH" mtu $((OVERLAY_MTU + 32)) up
+          # MACsec adds up to 32 bytes of overhead (SecTAG + ICV for
+          # GCM-AES-256). Give the underlying veth the extra room — it's a
+          # virtual, host-only link with no physical MTU constraint — so the
+          # macsec interface on top of it can still carry a full
+          # OVERLAY_MTU-sized frame.
+          sudo ip link set "$LOCAL_VETH" mtu $((OVERLAY_MTU + 32)) up
 
-      # Note the argument order: `port` (part of this device's own SCI) has
-      # to come before `cipher` — iproute2's macsec option parser is
-      # positional here, not a free-order keyword scanner, and silently
-      # rejects `port` if it comes after `cipher` ("unknown command
-      # \"port\"?"). Unlike the veth-pair creation above, none of these four
-      # commands race against the sibling script invocation (each side only
-      # ever touches its own uniquely-named macsec interface), so their
-      # stderr is deliberately left unsuppressed — a real failure here
-      # should be loud, not silently swallowed.
-      sudo ip link add link "$LOCAL_VETH" "$MACSEC_IF" type macsec port 1 cipher gcm-aes-256 encrypt on
-      sudo ip macsec add "$MACSEC_IF" tx sa 0 pn 1 on key "$KEY_ID" "$KEY_HEX"
-      sudo ip macsec add "$MACSEC_IF" rx port 1 address "$PEER_MAC" on
-      sudo ip macsec add "$MACSEC_IF" rx port 1 address "$PEER_MAC" sa 0 pn 1 on key "$KEY_ID" "$KEY_HEX"
+          # Note the argument order: `port` (part of this device's own SCI)
+          # has to come before `cipher` — iproute2's macsec option parser is
+          # positional here, not a free-order keyword scanner, and silently
+          # rejects `port` if it comes after `cipher` ("unknown command
+          # \"port\"?"). Unlike the veth-pair creation above, none of these
+          # four commands race against the sibling script invocation (each
+          # side only ever touches its own uniquely-named macsec interface),
+          # so their stderr is deliberately left unsuppressed — a real
+          # failure here should be loud, not silently swallowed.
+          sudo ip link add link "$LOCAL_VETH" "$MACSEC_IF" type macsec port 1 cipher gcm-aes-256 encrypt on
+          sudo ip macsec add "$MACSEC_IF" tx sa 0 pn 1 on key "$KEY_ID" "$KEY_HEX"
+          sudo ip macsec add "$MACSEC_IF" rx port 1 address "$PEER_MAC" on
+          sudo ip macsec add "$MACSEC_IF" rx port 1 address "$PEER_MAC" sa 0 pn 1 on key "$KEY_ID" "$KEY_HEX"
 
-      sudo ip link set "$MACSEC_IF" master "$BR_NAME"
-      sudo ip link set "$MACSEC_IF" mtu $OVERLAY_MTU up
+          sudo ip link set "$MACSEC_IF" master "$BR_NAME"
+          sudo ip link set "$MACSEC_IF" mtu $OVERLAY_MTU up
+      else
+          # Encryption disabled: attach the veth straight to the bridge, no
+          # macsec interface in between.
+          sudo ip link set "$LOCAL_VETH" master "$BR_NAME"
+          sudo ip link set "$LOCAL_VETH" mtu $OVERLAY_MTU up
+      fi
   else
       # Create the VXLAN tunnel using your physical IP and interface. Each
       # tunnel gets its own dstport (instead of the IANA-standard 4789) so
@@ -129,51 +139,56 @@ if [ "$LOCAL_IP" == "$REMOTE_IP" ]; then
       sudo ip link set vxlan-$NS_NAME master $BR_NAME
       sudo ip link set vxlan-$NS_NAME mtu $OVERLAY_MTU up
 
-      # Encrypt this tunnel's traffic at the kernel level (AES-256-GCM via
-      # IPsec/ESP, transport mode) between the two hosts' physical IPs,
-      # scoped to this tunnel's dstport so it doesn't collide with any other
-      # concurrent VXLAN tunnel between the same host pair.
-      #
-      # RFC4106 GCM keys are "AES key || 4-byte salt". The server only hands
-      # out a 32-byte AES key (shared verbatim by both VLAN's software AEAD
-      # and this XFRM SA), so the salt is derived here, identically on both
-      # ends, from that same key — it doesn't need to be secret on its own,
-      # only reproducible from the shared secret both sides already have.
-      SALT_HEX=$(printf '%s' "$KEY_HEX" | sha256sum | cut -c1-8)
-      # `ip xfrm state add`'s ALGO-KEYMAT requires a "0x" prefix — a bare hex
-      # string is rejected outright with a bare "RTNETLINK answers: Invalid
-      # argument", confirmed by extensive live testing (see commit history).
-      AEAD_KEY_HEX="0x${KEY_HEX}${SALT_HEX}"
-      # SPI values 1-255 are IANA-reserved (RFC 4301) and the kernel's XFRM
-      # code rejects them outright ("Invalid argument"). vxlan_id starts at
-      # 101 (see net_id_pool.rs), which falls straight into that reserved
-      # range — offset it well clear of 255 rather than using the raw ID.
-      SPI=$(printf '0x%08x' $((VXLAN_ID + 1000)))
+      if [ "$ENCRYPTED" == "true" ]; then
+          # Encrypt this tunnel's traffic at the kernel level (AES-256-GCM via
+          # IPsec/ESP, transport mode) between the two hosts' physical IPs,
+          # scoped to this tunnel's dstport so it doesn't collide with any
+          # other concurrent VXLAN tunnel between the same host pair.
+          #
+          # RFC4106 GCM keys are "AES key || 4-byte salt". The server only
+          # hands out a 32-byte AES key (shared verbatim by both VLAN's
+          # software AEAD and this XFRM SA), so the salt is derived here,
+          # identically on both ends, from that same key — it doesn't need
+          # to be secret on its own, only reproducible from the shared
+          # secret both sides already have.
+          SALT_HEX=$(printf '%s' "$KEY_HEX" | sha256sum | cut -c1-8)
+          # `ip xfrm state add`'s ALGO-KEYMAT requires a "0x" prefix — a bare
+          # hex string is rejected outright with a bare "RTNETLINK answers:
+          # Invalid argument", confirmed by extensive live testing (see
+          # commit history).
+          AEAD_KEY_HEX="0x${KEY_HEX}${SALT_HEX}"
+          # SPI values 1-255 are IANA-reserved (RFC 4301) and the kernel's
+          # XFRM code rejects them outright ("Invalid argument"). vxlan_id
+          # starts at 101 (see net_id_pool.rs), which falls straight into
+          # that reserved range — offset it well clear of 255 rather than
+          # using the raw ID.
+          SPI=$(printf '0x%08x' $((VXLAN_ID + 1000)))
 
-      # Outbound: this host -> remote.
-      # Note the argument order in both commands below — same lesson as
-      # the macsec argument-order bug, `ip xfrm` is positional, not a
-      # free-order keyword scanner:
-      #   - `state add`: the ALGO-LIST (`aead ...`) must come before
-      #     `mode`, not after — "ID [ALGO-LIST] [mode MODE] ..." per
-      #     `ip xfrm state help`. Reversed, it fails with a bare
-      #     "RTNETLINK answers: Invalid argument".
-      #   - `policy add`: the selector (src/dst/proto/dport) must stay
-      #     contiguous, with `dir` only appearing after it's complete —
-      #     "SELECTOR dir DIR ..." per `ip xfrm policy help`. Splitting it
-      #     by putting `dir` in the middle confuses the parser into
-      #     thinking `proto` was given twice ("duplicate \"unknown\":
-      #     \"proto\" is the second value").
-      sudo ip xfrm state add src $LOCAL_IP dst $REMOTE_IP proto esp spi $SPI \
-          aead 'rfc4106(gcm(aes))' $AEAD_KEY_HEX 128 mode transport
-      sudo ip xfrm policy add src $LOCAL_IP dst $REMOTE_IP proto udp dport $DSTPORT dir out \
-          tmpl src $LOCAL_IP dst $REMOTE_IP proto esp spi $SPI mode transport
+          # Outbound: this host -> remote.
+          # Note the argument order in both commands below — same lesson as
+          # the macsec argument-order bug, `ip xfrm` is positional, not a
+          # free-order keyword scanner:
+          #   - `state add`: the ALGO-LIST (`aead ...`) must come before
+          #     `mode`, not after — "ID [ALGO-LIST] [mode MODE] ..." per
+          #     `ip xfrm state help`. Reversed, it fails with a bare
+          #     "RTNETLINK answers: Invalid argument".
+          #   - `policy add`: the selector (src/dst/proto/dport) must stay
+          #     contiguous, with `dir` only appearing after it's complete —
+          #     "SELECTOR dir DIR ..." per `ip xfrm policy help`. Splitting
+          #     it by putting `dir` in the middle confuses the parser into
+          #     thinking `proto` was given twice ("duplicate \"unknown\":
+          #     \"proto\" is the second value").
+          sudo ip xfrm state add src $LOCAL_IP dst $REMOTE_IP proto esp spi $SPI \
+              aead 'rfc4106(gcm(aes))' $AEAD_KEY_HEX 128 mode transport
+          sudo ip xfrm policy add src $LOCAL_IP dst $REMOTE_IP proto udp dport $DSTPORT dir out \
+              tmpl src $LOCAL_IP dst $REMOTE_IP proto esp spi $SPI mode transport
 
-      # Inbound: remote -> this host.
-      sudo ip xfrm state add src $REMOTE_IP dst $LOCAL_IP proto esp spi $SPI \
-          aead 'rfc4106(gcm(aes))' $AEAD_KEY_HEX 128 mode transport
-      sudo ip xfrm policy add src $REMOTE_IP dst $LOCAL_IP proto udp dport $DSTPORT dir in \
-          tmpl src $REMOTE_IP dst $LOCAL_IP proto esp spi $SPI mode transport
+          # Inbound: remote -> this host.
+          sudo ip xfrm state add src $REMOTE_IP dst $LOCAL_IP proto esp spi $SPI \
+              aead 'rfc4106(gcm(aes))' $AEAD_KEY_HEX 128 mode transport
+          sudo ip xfrm policy add src $REMOTE_IP dst $LOCAL_IP proto udp dport $DSTPORT dir in \
+              tmpl src $REMOTE_IP dst $LOCAL_IP proto esp spi $SPI mode transport
+      fi
   fi
 
 # Enable IP forwarding:

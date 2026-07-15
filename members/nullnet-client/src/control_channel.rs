@@ -183,22 +183,30 @@ async fn handle_vlan_setup(
         })?;
     // Fail before touching the network if the key is malformed — running
     // this tunnel without a valid key would mean forwarding traffic in the
-    // clear instead of encrypted.
-    let encryption_key: [u8; 32] = message
-        .encryption_key
-        .try_into()
-        .map_err(|_| "VLAN setup message carried a malformed encryption key")
-        .handle_err(location!())
-        .inspect_err(|e| {
-            fire_event(
-                &grpc,
-                AgentEventKind::VlanSetupFailed(AgentVlanSetupFailed {
-                    vlan_id: message.vlan_id,
-                    local_veth: local_veth.to_string(),
-                    error_reason: e.to_str().to_string(),
-                }),
-            );
-        })?;
+    // clear instead of encrypted. Skipped entirely when the server had
+    // encryption disabled (ENCRYPTION_ENABLED=false) — `encryption_key` is
+    // just placeholder zero bytes in that case, not a real key to validate.
+    let encryption_key: Option<[u8; 32]> = if message.encrypted {
+        Some(
+            message
+                .encryption_key
+                .try_into()
+                .map_err(|_| "VLAN setup message carried a malformed encryption key")
+                .handle_err(location!())
+                .inspect_err(|e| {
+                    fire_event(
+                        &grpc,
+                        AgentEventKind::VlanSetupFailed(AgentVlanSetupFailed {
+                            vlan_id: message.vlan_id,
+                            local_veth: local_veth.to_string(),
+                            error_reason: e.to_str().to_string(),
+                        }),
+                    );
+                })?,
+        )
+    } else {
+        None
+    };
 
     // setup VLAN on this machine
     let init_t = std::time::Instant::now();
@@ -213,11 +221,14 @@ async fn handle_vlan_setup(
         init_t.elapsed().as_millis()
     );
 
-    // register peer + this tunnel's encryption key
+    // register peer + this tunnel's encryption state
     {
         let mut peers = peers.write().await;
         peers.insert(VethKey::new(remote_veth, vlan_id), remote_ip);
-        peers.insert_key(vlan_id, &encryption_key);
+        match encryption_key {
+            Some(key) => peers.insert_key(vlan_id, &key),
+            None => peers.insert_plaintext(vlan_id),
+        }
     }
 
     // allow this peer's data-plane traffic through the host firewall
@@ -341,23 +352,30 @@ async fn handle_vxlan_setup(
         .handle_err(location!())?;
     // Fail before touching the network if the key is malformed — running
     // this tunnel without a valid key would mean forwarding traffic in the
-    // clear instead of encrypted.
-    let encryption_key: [u8; 32] = message
-        .encryption_key
-        .try_into()
-        .map_err(|_| "VXLAN setup message carried a malformed encryption key")
-        .handle_err(location!())
-        .inspect_err(|e| {
-            fire_event(
-                &grpc,
-                AgentEventKind::VxlanSetupFailed(AgentVxlanSetupFailed {
-                    vxlan_id,
-                    ns_name: ns_name.clone(),
-                    error_code: -1,
-                }),
-            );
-            eprintln!("[vxlan_setup] {}", e.to_str());
-        })?;
+    // clear instead of encrypted. Skipped entirely when the server had
+    // encryption disabled (ENCRYPTION_ENABLED=false) — `encryption_key` is
+    // just placeholder zero bytes in that case, and vxlan-setup.sh ignores
+    // it (see the `encrypted` arg passed below).
+    let encryption_key: [u8; 32] = if message.encrypted {
+        message
+            .encryption_key
+            .try_into()
+            .map_err(|_| "VXLAN setup message carried a malformed encryption key")
+            .handle_err(location!())
+            .inspect_err(|e| {
+                fire_event(
+                    &grpc,
+                    AgentEventKind::VxlanSetupFailed(AgentVxlanSetupFailed {
+                        vxlan_id,
+                        ns_name: ns_name.clone(),
+                        error_code: -1,
+                    }),
+                );
+                eprintln!("[vxlan_setup] {}", e.to_str());
+            })?
+    } else {
+        [0u8; 32]
+    };
 
     // allow this peer's data-plane (VXLAN underlay) traffic through the host
     // firewall before the tunnel comes up, so the first packets aren't dropped.
@@ -385,7 +403,8 @@ async fn handle_vxlan_setup(
         .arg(local_ip.to_string())
         .arg(remote_ip.to_string())
         .arg(hex_encode(&encryption_key))
-        .arg(message.dstport.to_string());
+        .arg(message.dstport.to_string())
+        .arg(if message.encrypted { "true" } else { "false" });
     // Egress-steer edges keep their tunnel endpoint in the host root namespace
     // (no `docker_container` arg) so the initiator container's *forwarded*
     // external traffic can be policy-routed into the bridge. Other edges attach

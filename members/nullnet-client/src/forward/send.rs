@@ -8,7 +8,7 @@ use tun_rs::AsyncDevice;
 
 use crate::crypto;
 use crate::forward::frame::Frame;
-use crate::peers::peer::{Peers, VethKey};
+use crate::peers::peer::{Peers, VethKey, VlanCipher};
 
 /// Handles outgoing network packets (receives packets from the TAP interface
 /// and sends them to the socket).
@@ -24,13 +24,17 @@ pub async fn send(device: &Arc<AsyncDevice>, socket: &Arc<UdpSocket>, peers: Arc
             let Ok((dst_socket, vlan_id)) = get_dst_socket(pkt_data, &peers).await else {
                 continue;
             };
-            // encrypt as the packet enters the tunnel: without a key for
-            // this vlan_id (tunnel torn down mid-flight, or setup never
-            // landed) there is nothing safe to send.
-            let Some(cipher) = peers.read().await.get_key(vlan_id) else {
+            // encrypt (or frame plain) as the packet enters the tunnel:
+            // without a registered state for this vlan_id (tunnel torn down
+            // mid-flight, or setup never landed) there is nothing safe to send.
+            let Some(vlan_key) = peers.read().await.get_key(vlan_id) else {
                 continue;
             };
-            if let Some(datagram) = crypto::seal(vlan_id, &cipher, pkt_data) {
+            let datagram = match vlan_key {
+                VlanCipher::Encrypted(cipher) => crypto::seal(vlan_id, &cipher, pkt_data),
+                VlanCipher::Plaintext => Some(crypto::seal_plain(vlan_id, pkt_data)),
+            };
+            if let Some(datagram) = datagram {
                 socket.send_to(&datagram, dst_socket).await.unwrap_or(0);
             }
         }

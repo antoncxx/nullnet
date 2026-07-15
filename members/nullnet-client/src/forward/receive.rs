@@ -6,7 +6,7 @@ use tun_rs::AsyncDevice;
 
 use crate::crypto;
 use crate::forward::frame::Frame;
-use crate::peers::peer::Peers;
+use crate::peers::peer::{Peers, VlanCipher};
 
 /// Handles incoming network packets (receives packets from the socket and
 /// writes them to the TAP interface).
@@ -30,13 +30,20 @@ pub async fn receive(
             let Some((vlan_id, sealed)) = crypto::open_vlan_id(datagram) else {
                 continue;
             };
-            let Some(cipher) = peers.read().await.get_key(vlan_id) else {
+            let Some(vlan_key) = peers.read().await.get_key(vlan_id) else {
                 continue;
             };
             // decrypt as the packet exits the tunnel; auth failure (wrong
-            // key, corrupted/spoofed datagram) drops it here
-            let Some(pkt_data) = cipher.decrypt(sealed) else {
-                continue;
+            // key, corrupted/spoofed datagram) drops it here. Plaintext
+            // tunnels have nothing to authenticate — the bytes are the frame.
+            let pkt_data = match vlan_key {
+                VlanCipher::Encrypted(cipher) => {
+                    let Some(data) = cipher.decrypt(sealed) else {
+                        continue;
+                    };
+                    data
+                }
+                VlanCipher::Plaintext => sealed.to_vec(),
             };
 
             // write packet to the kernel

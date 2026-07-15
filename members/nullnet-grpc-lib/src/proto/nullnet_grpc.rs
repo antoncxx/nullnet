@@ -66,8 +66,14 @@ pub struct VlanSetup {
     /// Per-tunnel AES-256 key (32 raw bytes), generated once by the server and
     /// sent identically to both endpoints. Used to encrypt/decrypt traffic in
     /// the client's userspace VLAN forwarder (see forward/send.rs, forward/receive.rs).
+    /// Meaningless (placeholder zero bytes) when `encrypted` is false.
     #[prost(bytes = "vec", tag = "8")]
     pub encryption_key: ::prost::alloc::vec::Vec<u8>,
+    /// Whether this tunnel is encrypted, mirroring the server's ENCRYPTION_ENABLED
+    /// env var at the time this edge was set up. When false, the client skips
+    /// `encryption_key` entirely and forwards this VLAN's traffic in the clear.
+    #[prost(bool, tag = "9")]
+    pub encrypted: bool,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct VlanTeardown {
@@ -113,15 +119,23 @@ pub struct VxlanSetup {
     pub egress_intercept: ::core::option::Option<bool>,
     /// Per-tunnel AES-256 key (32 raw bytes), generated once by the server and
     /// sent identically to both endpoints. Used as the XFRM/ESP SA key that
-    /// encrypts this tunnel's traffic at the kernel level.
+    /// encrypts this tunnel's traffic at the kernel level. Meaningless
+    /// (placeholder zero bytes) when `encrypted` is false.
     #[prost(bytes = "vec", tag = "14")]
     pub encryption_key: ::prost::alloc::vec::Vec<u8>,
     /// Per-tunnel VXLAN UDP destination port (replaces the IANA-standard 4789
     /// default). Each tunnel gets a distinct port so an XFRM policy — which
     /// selects by src/dst IP and port, not by VNI — can tell concurrent
-    /// tunnels between the same host pair apart.
+    /// tunnels between the same host pair apart. Allocated regardless of
+    /// `encrypted`, for simplicity.
     #[prost(uint32, tag = "15")]
     pub dstport: u32,
+    /// Whether this tunnel is encrypted, mirroring the server's ENCRYPTION_ENABLED
+    /// env var at the time this edge was set up. When false, the client skips
+    /// `encryption_key` and vxlan-setup.sh sets up a bare vxlan/veth link with no
+    /// XFRM SA/policy or MACsec.
+    #[prost(bool, tag = "16")]
+    pub encrypted: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct VxlanTeardown {

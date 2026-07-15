@@ -34,6 +34,7 @@ pub(crate) trait NetExt {
         dnat_port: Option<u32>,
         encryption_key: [u8; 32],
         dstport: Option<u32>,
+        encrypted: bool,
         egress: EgressRole,
     ) -> Option<(Ipv4Addr, NetMessage)>;
 
@@ -61,6 +62,7 @@ impl NetExt for Net {
         dnat_port: Option<u32>,
         encryption_key: [u8; 32],
         dstport: Option<u32>,
+        encrypted: bool,
         egress: EgressRole,
     ) -> Option<(Ipv4Addr, NetMessage)> {
         match self {
@@ -71,6 +73,7 @@ impl NetExt for Net {
                 net_id,
                 remote,
                 encryption_key,
+                encrypted,
             ),
             Net::Vxlan => vxlan_setup(
                 msg_id,
@@ -82,6 +85,7 @@ impl NetExt for Net {
                 dnat_port,
                 encryption_key,
                 dstport.unwrap_or(0),
+                encrypted,
                 egress,
             ),
         }
@@ -125,6 +129,7 @@ fn vlan_setup(
     vlan_id: u32,
     remote: IpAddr,
     encryption_key: [u8; 32],
+    encrypted: bool,
 ) -> Option<(Ipv4Addr, NetMessage)> {
     // Map vlan_id to a /30 block within 10.0.0.0/8.
     // Each ID gets 4 IPs (2 usable), with 2 IPs used for server/client veth.
@@ -159,6 +164,7 @@ fn vlan_setup(
                 remote_ip: remote.to_string(),
                 host_mapping,
                 encryption_key: encryption_key.to_vec(),
+                encrypted,
             })),
         },
     ))
@@ -175,6 +181,7 @@ fn vxlan_setup(
     dnat_port: Option<u32>,
     encryption_key: [u8; 32],
     dstport: u32,
+    encrypted: bool,
     egress: EgressRole,
 ) -> Option<(Ipv4Addr, NetMessage)> {
     // Map vxlan_id to a /29 block within 10.0.0.0/8.
@@ -245,6 +252,7 @@ fn vxlan_setup(
                 dstport,
                 egress_steer,
                 egress_intercept,
+                encrypted,
             })),
         },
     ))

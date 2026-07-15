@@ -1,4 +1,4 @@
-use crate::env::{NET_TYPE, PROXY_IP};
+use crate::env::{ENCRYPTION_ENABLED, NET_TYPE, PROXY_IP};
 use crate::events::Event;
 use crate::graphviz::generate_graphviz;
 use crate::net::EgressRole;
@@ -995,11 +995,14 @@ impl NullnetGrpcImpl {
                 }
 
                 // One AES-256 key per tunnel, handed identically to both
-                // endpoints below. For VXLAN, also reserve a per-tunnel UDP
-                // dstport so the two hosts' XFRM policies can tell this
-                // tunnel apart from any other concurrent tunnel between the
-                // same physical host pair.
-                let encryption_key = generate_key();
+                // endpoints below (skipped when encryption is globally
+                // disabled). For VXLAN, also reserve a per-tunnel UDP dstport
+                // so the two hosts' XFRM policies can tell this tunnel apart
+                // from any other concurrent tunnel between the same physical
+                // host pair — allocated regardless of encryption, for
+                // simplicity.
+                let encrypted = *ENCRYPTION_ENABLED;
+                let encryption_key = if encrypted { generate_key() } else { [0u8; 32] };
                 let dstport = if *NET_TYPE == Net::Vxlan {
                     match orchestrator.allocate_vxlan_port(net_id).await {
                         Some(port) => Some(u32::from(port)),
@@ -1031,6 +1034,7 @@ impl NullnetGrpcImpl {
                     None,
                     encryption_key,
                     dstport,
+                    encrypted,
                     server_egress,
                 );
                 let orch2 = orchestrator.clone();
@@ -1045,6 +1049,7 @@ impl NullnetGrpcImpl {
                     backend_entry_port,
                     encryption_key,
                     dstport,
+                    encrypted,
                     client_egress,
                 );
 

@@ -52,6 +52,17 @@ pub(crate) fn seal(vlan_id: u16, cipher: &TunnelCipher, plaintext: &[u8]) -> Opt
     Some(out)
 }
 
+/// Wire framing for a VLAN tunnel with encryption disabled: the same
+/// `vlan_id[2, big-endian] || ...` prefix as `seal`, but the frame follows
+/// as-is afterward — no nonce, no AEAD transform. Both ends agree on which
+/// framing applies to a given `vlan_id` from the same `VlanSetup.encrypted`
+/// flag, so there's no ambiguity despite the shorter format.
+pub(crate) fn seal_plain(vlan_id: u16, plaintext: &[u8]) -> Vec<u8> {
+    let mut out = vlan_id.to_be_bytes().to_vec();
+    out.extend_from_slice(plaintext);
+    out
+}
+
 /// Splits a raw forward-socket datagram into its cleartext `vlan_id` and the
 /// remaining `nonce || ciphertext+tag` slice, ready for `TunnelCipher::decrypt`.
 pub(crate) fn open_vlan_id(datagram: &[u8]) -> Option<(u16, &[u8])> {
@@ -67,7 +78,7 @@ pub(crate) fn open_vlan_id(datagram: &[u8]) -> Option<(u16, &[u8])> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TunnelCipher, open_vlan_id, seal};
+    use super::{TunnelCipher, open_vlan_id, seal, seal_plain};
 
     #[test]
     fn round_trip() {
@@ -108,6 +119,16 @@ mod tests {
         let (vlan_id, rest) = open_vlan_id(&datagram).unwrap();
         assert_eq!(vlan_id, 4242);
         assert_eq!(cipher.decrypt(rest).unwrap(), frame);
+    }
+
+    #[test]
+    fn seal_plain_then_open_round_trips_vlan_id_and_frame_untransformed() {
+        let frame = b"ethernet frame payload";
+        let datagram = seal_plain(4242, frame);
+
+        let (vlan_id, rest) = open_vlan_id(&datagram).unwrap();
+        assert_eq!(vlan_id, 4242);
+        assert_eq!(rest, frame);
     }
 
     #[test]

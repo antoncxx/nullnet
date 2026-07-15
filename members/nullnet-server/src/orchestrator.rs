@@ -1,4 +1,4 @@
-use crate::env::NET_TYPE;
+use crate::env::{ENCRYPTION_ENABLED, NET_TYPE};
 use crate::events::{Event, EventStore};
 use crate::net::{EgressRole, NetExt};
 use crate::net_id_pool::{NetIdPool, UdpPortPool, generate_key};
@@ -174,10 +174,12 @@ impl Orchestrator {
         };
 
         // One AES-256 key per tunnel, shared by both ends, same as any other
-        // chain edge. For VXLAN, also reserve a per-tunnel UDP dstport so
-        // XFRM policies can tell concurrent tunnels between the same host
-        // pair apart (mirrors net_chain_setup's setup in nullnet_grpc_impl.rs).
-        let encryption_key = generate_key();
+        // chain edge (skipped when encryption is globally disabled). For
+        // VXLAN, also reserve a per-tunnel UDP dstport so XFRM policies can
+        // tell concurrent tunnels between the same host pair apart (mirrors
+        // net_chain_setup's setup in nullnet_grpc_impl.rs).
+        let encrypted = *ENCRYPTION_ENABLED;
+        let encryption_key = if encrypted { generate_key() } else { [0u8; 32] };
         let dstport = if *NET_TYPE == Net::Vxlan {
             match self.allocate_vxlan_port(net_id).await {
                 Some(port) => Some(u32::from(port)),
@@ -203,6 +205,7 @@ impl Orchestrator {
             None,
             encryption_key,
             dstport,
+            encrypted,
             EgressRole::Intercept,
         );
         let init_res = self.send_net_setup(
@@ -214,6 +217,7 @@ impl Orchestrator {
             None,
             encryption_key,
             dstport,
+            encrypted,
             EgressRole::Steer,
         );
         let (proxy_ok, init_ok) = tokio::join!(proxy_res, init_res);
@@ -344,6 +348,7 @@ impl Orchestrator {
         dnat_port: Option<u32>,
         encryption_key: [u8; 32],
         dstport: Option<u32>,
+        encrypted: bool,
         egress: EgressRole,
     ) -> Option<Ipv4Addr> {
         let outbound = self.clients.read().await.get(&dest).cloned();
@@ -362,6 +367,7 @@ impl Orchestrator {
                 dnat_port,
                 encryption_key,
                 dstport,
+                encrypted,
                 egress,
             )?;
 

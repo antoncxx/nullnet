@@ -1,5 +1,6 @@
 use crate::env::NET_TYPE;
 use crate::events::{Event, EventStore};
+use crate::geo::{GeoCache, GeoInfo};
 use crate::net::{EgressRole, NetExt};
 use crate::net_id_pool::NetIdPool;
 use crate::services::changes::{apply_changes, detect_node_disconnect_changes};
@@ -53,6 +54,8 @@ pub(crate) struct EgressDestination {
     pub(crate) ip: Ipv4Addr,
     pub(crate) last_seen: u64,
     pub(crate) count: u64,
+    /// Geo/ASN enrichment, if the lookup has resolved yet (else `None`).
+    pub(crate) geo: Option<GeoInfo>,
 }
 
 /// Read-only snapshot of a live egress edge, for topology rendering.
@@ -74,6 +77,8 @@ pub struct Orchestrator {
     /// Live egress edges, keyed by initiator replica. Separate from the service
     /// StackMap because the proxy end is infrastructure, not a registered service.
     egress_edges: Arc<RwLock<HashMap<EgressKey, EgressEdge>>>,
+    /// IP → country/ASN cache enriching contacted egress destinations.
+    geo: GeoCache,
     pub(crate) events: EventStore,
 }
 
@@ -84,6 +89,7 @@ impl Orchestrator {
             pending: Arc::new(Mutex::new(HashMap::new())),
             net_id_pool: Arc::new(Mutex::new(NetIdPool::new())),
             egress_edges: Arc::new(RwLock::new(HashMap::new())),
+            geo: GeoCache::from_env(),
             events: EventStore::new(),
         }
     }
@@ -261,6 +267,7 @@ impl Orchestrator {
                         ip: *ip,
                         last_seen: s.last_seen,
                         count: s.count,
+                        geo: self.geo.get(*ip),
                     })
                     .collect();
                 destinations.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(a.ip.cmp(&b.ip)));
@@ -294,6 +301,8 @@ impl Orchestrator {
         let Some(edge) = edges.get_mut(&key) else {
             return;
         };
+        // Kick off (cached, once-per-IP) geo/ASN enrichment for the UI.
+        self.geo.ensure(dst_ip);
         match edge.destinations.get_mut(&dst_ip) {
             Some(stat) => {
                 stat.last_seen = last_seen;

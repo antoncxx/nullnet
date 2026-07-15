@@ -127,6 +127,11 @@ export interface EgressDestination {
   ip: string;
   last_seen: number;
   count: number;
+  /** ISO alpha-2 country code (for the flag), if resolved. */
+  country_code?: string;
+  asn?: string;
+  /** ASN organization name. */
+  org?: string;
 }
 
 export interface GraphEdgeJson {

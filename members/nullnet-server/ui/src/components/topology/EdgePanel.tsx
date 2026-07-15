@@ -11,6 +11,15 @@ function formatTime(unix: number): string {
   return new Date(unix * 1000).toLocaleTimeString([], { hour12: false });
 }
 
+/// ISO alpha-2 country code → flag emoji (regional-indicator letters). Empty
+/// string for anything that isn't two ASCII letters (e.g. a country name).
+function flagEmoji(cc?: string): string {
+  if (!cc || !/^[A-Za-z]{2}$/.test(cc)) return '';
+  const base = 0x1f1e6;
+  const u = cc.toUpperCase();
+  return String.fromCodePoint(base + u.charCodeAt(0) - 65, base + u.charCodeAt(1) - 65);
+}
+
 /// Render the contacted-destination list for a single egress edge.
 function DestinationList({ destinations }: { destinations: EgressDestination[] }) {
   if (destinations.length === 0) {
@@ -23,16 +32,28 @@ function DestinationList({ destinations }: { destinations: EgressDestination[] }
   return (
     <table style={{ borderCollapse: 'collapse', width: '100%', fontFamily: "'JetBrains Mono',monospace" }}>
       <tbody>
-        {destinations.map(d => (
-          <tr key={d.ip}>
-            <td style={{ fontSize: 10, color: '#a78bfa', paddingRight: 8, paddingTop: 2, wordBreak: 'break-all', verticalAlign: 'top' }}>
-              {d.ip}
-            </td>
-            <td style={{ fontSize: 9.5, color: 'var(--t1)', textAlign: 'right', whiteSpace: 'nowrap', verticalAlign: 'top', paddingTop: 2 }}>
-              ×{d.count} · {formatTime(d.last_seen)}
-            </td>
-          </tr>
-        ))}
+        {destinations.map(d => {
+          const flag = flagEmoji(d.country_code);
+          return (
+            <tr key={d.ip}>
+              <td style={{ paddingRight: 8, paddingTop: 3, wordBreak: 'break-all', verticalAlign: 'top' }}>
+                <div style={{ fontSize: 10, color: '#a78bfa' }}>
+                  {flag && <span style={{ marginRight: 5 }}>{flag}</span>}
+                  {d.ip}
+                  {d.country_code && (
+                    <span style={{ color: 'var(--t1)', marginLeft: 5 }}>{d.country_code.toUpperCase()}</span>
+                  )}
+                </div>
+                {d.org && (
+                  <div style={{ fontSize: 9, color: 'var(--t2)', marginTop: 1 }}>{d.org}</div>
+                )}
+              </td>
+              <td style={{ fontSize: 9.5, color: 'var(--t1)', textAlign: 'right', whiteSpace: 'nowrap', verticalAlign: 'top', paddingTop: 3 }}>
+                ×{d.count} · {formatTime(d.last_seen)}
+              </td>
+            </tr>
+          );
+        })}
       </tbody>
     </table>
   );

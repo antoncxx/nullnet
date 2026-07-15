@@ -213,6 +213,12 @@ struct EgressDestJson {
     ip: String,
     last_seen: u64,
     count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    country_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    asn: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    org: Option<String>,
 }
 
 /// Resolve the registered service name owning the replica `(ip, docker)`.
@@ -321,6 +327,9 @@ pub(crate) fn render_graph_json(
                         ip: d.ip.to_string(),
                         last_seen: d.last_seen,
                         count: d.count,
+                        country_code: d.geo.as_ref().and_then(|g| g.country_code.clone()),
+                        asn: d.geo.as_ref().and_then(|g| g.asn.clone()),
+                        org: d.geo.as_ref().and_then(|g| g.org.clone()),
                     })
                     .collect(),
             })

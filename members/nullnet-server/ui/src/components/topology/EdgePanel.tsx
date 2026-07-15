@@ -28,7 +28,7 @@ function DestinationList({ destinations }: { destinations: EgressDestination[] }
             <td style={{ fontSize: 10, color: '#a78bfa', paddingRight: 8, paddingTop: 2, wordBreak: 'break-all', verticalAlign: 'top' }}>
               {d.ip}
             </td>
-            <td style={{ fontSize: 9, color: 'var(--t2)', textAlign: 'right', whiteSpace: 'nowrap', verticalAlign: 'top', paddingTop: 2 }}>
+            <td style={{ fontSize: 9.5, color: 'var(--t1)', textAlign: 'right', whiteSpace: 'nowrap', verticalAlign: 'top', paddingTop: 2 }}>
               ×{d.count} · {formatTime(d.last_seen)}
             </td>
           </tr>

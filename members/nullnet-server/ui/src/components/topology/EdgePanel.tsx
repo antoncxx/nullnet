@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import type { GraphEdgeJson, SessionJson } from '../../types';
+import type { GraphEdgeJson, SessionJson, EgressDestination } from '../../types';
 import { spRow, spKey, spCode } from './panelStyles';
 import { useTopologyData } from './TopologyContext';
 
@@ -7,8 +7,45 @@ interface Props {
   edges: GraphEdgeJson[];
 }
 
+function formatTime(unix: number): string {
+  return new Date(unix * 1000).toLocaleTimeString([], { hour12: false });
+}
+
+/// Render the contacted-destination list for a single egress edge.
+function DestinationList({ destinations }: { destinations: EgressDestination[] }) {
+  if (destinations.length === 0) {
+    return (
+      <div style={{ fontSize: 10, color: 'var(--t2)', fontFamily: "'JetBrains Mono',monospace" }}>
+        → internet (no traffic yet)
+      </div>
+    );
+  }
+  return (
+    <table style={{ borderCollapse: 'collapse', width: '100%', fontFamily: "'JetBrains Mono',monospace" }}>
+      <tbody>
+        {destinations.map(d => (
+          <tr key={d.ip}>
+            <td style={{ fontSize: 10, color: '#a78bfa', paddingRight: 8, paddingTop: 2, wordBreak: 'break-all', verticalAlign: 'top' }}>
+              {d.ip}
+            </td>
+            <td style={{ fontSize: 9, color: 'var(--t2)', textAlign: 'right', whiteSpace: 'nowrap', verticalAlign: 'top', paddingTop: 2 }}>
+              ×{d.count} · {formatTime(d.last_seen)}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
 export default function EdgePanel({ edges }: Props) {
   const { chains, sessions } = useTopologyData();
+
+  const egressDestCount = useMemo(() => {
+    const ips = new Set<string>();
+    for (const e of edges) for (const d of e.destinations ?? []) ips.add(d.ip);
+    return ips.size;
+  }, [edges]);
 
   const chainByProxyNetId = useMemo(() => {
     const m = new Map<number, number[]>();
@@ -44,8 +81,12 @@ export default function EdgePanel({ edges }: Props) {
       </div>
       {isEgress && (
         <div style={spRow}>
-          <div style={spKey}>Destination</div>
-          <div style={spCode}>internet</div>
+          <div style={spKey}>Destinations</div>
+          <div style={spCode}>
+            {egressDestCount > 0
+              ? `${egressDestCount} external IP${egressDestCount !== 1 ? 's' : ''}`
+              : 'internet (no traffic yet)'}
+          </div>
         </div>
       )}
       {first.via_proxy && (
@@ -80,9 +121,12 @@ export default function EdgePanel({ edges }: Props) {
               )}
             </div>
             {e.egress && (
-              <div style={{ fontSize: 10, color: '#a78bfa', fontFamily: "'JetBrains Mono',monospace" }}>
-                {e.from} → {e.to} → internet
-              </div>
+              <>
+                <div style={{ fontSize: 10, color: '#a78bfa', fontFamily: "'JetBrains Mono',monospace", marginBottom: 4 }}>
+                  {e.from} → {e.to} → {(e.destinations?.length ?? 0)} dest
+                </div>
+                <DestinationList destinations={e.destinations ?? []} />
+              </>
             )}
             {e.via_proxy && (
               <div style={{ fontSize: 10, color: '#fbbf24', fontFamily: "'JetBrains Mono',monospace", marginBottom: session ? 6 : 0 }}>

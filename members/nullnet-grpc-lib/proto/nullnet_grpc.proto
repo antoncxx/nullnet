@@ -29,6 +29,12 @@ service NullnetGrpc {
   // brokered through the proxy's transparent forward listener.
   rpc EgressTrigger(EgressTriggerRequest) returns (Empty);
 
+  // Report the external destinations a registered service contacted through its
+  // egress edge. Distinct from EgressTrigger (which builds the edge once): the
+  // client accumulates per-destination counts locally and flushes a batch
+  // periodically, so the server holds a live per-service list with counts.
+  rpc ReportEgressDestination(EgressDestinationReport) returns (Empty);
+
   // Report an event from a client or proxy agent back to the server.
   rpc ReportEvent(AgentEvent) returns (Empty);
 
@@ -229,6 +235,26 @@ message EgressTriggerRequest {
   // itself is destination-agnostic.
   string dst_ip = 3;
   uint32 dst_port = 4;
+}
+
+// Egress destination report — a periodic batch flush from the client. Each entry
+// is one external destination with a client-side running connection count and the
+// latest contact time. The server keys each entry to the service's egress edge by
+// (sender_ip, initiator_container) and stores the client-provided values verbatim
+// (the client is the sole reporter for its own edge).
+message EgressDestinationReport {
+  repeated EgressDestinationEntry entries = 1;
+}
+
+message EgressDestinationEntry {
+  // Real Docker container name of the initiator replica. Empty for a host
+  // process; disambiguates co-located replicas otherwise (as in EgressTrigger).
+  string initiator_container = 1;
+  string dst_ip = 2;
+  // Running count of NEW connections the client observed to this destination.
+  uint64 count = 3;
+  // Epoch seconds of the most recent connection to this destination.
+  uint64 last_seen = 4;
 }
 
 // TLS certificates ----------------------------------------------------------------------------------------------------

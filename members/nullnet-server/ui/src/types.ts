@@ -123,6 +123,12 @@ export interface GraphNodeJson {
   paused_replica_count: number;
 }
 
+export interface EgressDestination {
+  ip: string;
+  last_seen: number;
+  count: number;
+}
+
 export interface GraphEdgeJson {
   from: string;
   via_proxy?: string;
@@ -131,6 +137,8 @@ export interface GraphEdgeJson {
   setup_ms: number;
   /** Outbound egress edge: initiator service → gateway proxy. */
   egress?: boolean;
+  /** External destinations contacted through this egress edge. */
+  destinations?: EgressDestination[];
 }
 
 export interface GraphJson {

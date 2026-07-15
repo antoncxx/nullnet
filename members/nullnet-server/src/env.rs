@@ -34,9 +34,8 @@ pub static NET_TYPE: std::sync::LazyLock<Net> = std::sync::LazyLock::new(|| {
 /// MACsec. Defaults to enabled, preserving existing behavior when unset —
 /// this is an opt-out, not an opt-in, so it needs its own parser rather than
 /// nullnet-client's `env_bool` (which defaults false/opt-in).
-pub static ENCRYPTION_ENABLED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
-    match std::env::var("ENCRYPTION_ENABLED") {
+pub static ENCRYPTION_ENABLED: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| match std::env::var("ENCRYPTION_ENABLED") {
         Ok(s) => !matches!(s.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"),
         Err(_) => true,
-    }
-});
+    });

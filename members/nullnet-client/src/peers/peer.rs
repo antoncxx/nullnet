@@ -44,8 +44,10 @@ impl Peers {
     }
 
     pub fn insert_key(&mut self, vlan_id: u16, key: &[u8; 32]) {
-        self.keys
-            .insert(vlan_id, VlanCipher::Encrypted(Arc::new(TunnelCipher::new(key))));
+        self.keys.insert(
+            vlan_id,
+            VlanCipher::Encrypted(Arc::new(TunnelCipher::new(key))),
+        );
     }
 
     /// Register `vlan_id` as deliberately unencrypted (server's

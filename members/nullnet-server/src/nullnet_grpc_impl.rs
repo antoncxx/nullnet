@@ -2,6 +2,7 @@ use crate::env::{NET_TYPE, PROXY_IP};
 use crate::events::Event;
 use crate::graphviz::generate_graphviz;
 use crate::net::EgressRole;
+use crate::net_id_pool::generate_key;
 use crate::orchestrator::Orchestrator;
 use crate::services::changes::{
     apply_changes, collect_dep_chain_edges, detect_services_list_changes,
@@ -993,6 +994,31 @@ impl NullnetGrpcImpl {
                         .await;
                 }
 
+                // One AES-256 key per tunnel, handed identically to both
+                // endpoints below. For VXLAN, also reserve a per-tunnel UDP
+                // dstport so the two hosts' XFRM policies can tell this
+                // tunnel apart from any other concurrent tunnel between the
+                // same physical host pair.
+                let encryption_key = generate_key();
+                let dstport = if *NET_TYPE == Net::Vxlan {
+                    match orchestrator.allocate_vxlan_port(net_id).await {
+                        Some(port) => Some(u32::from(port)),
+                        None => {
+                            eprintln!("UDP port pool exhausted");
+                            orchestrator.free_net_id(net_id).await;
+                            if let Some(stack_map) = services.write().await.get_mut(&stack)
+                                && let Some(ServiceInfo::Registered(reg)) =
+                                    stack_map.get_mut(server.name())
+                            {
+                                reg.remove_client(&client);
+                            }
+                            return EdgeOutcome::Failed;
+                        }
+                    }
+                } else {
+                    None
+                };
+
                 let orch = orchestrator.clone();
                 let cd = client_docker.clone();
                 let sd = server_docker.clone();
@@ -1003,6 +1029,8 @@ impl NullnetGrpcImpl {
                     client_ethernet,
                     (cd, sd),
                     None,
+                    encryption_key,
+                    dstport,
                     server_egress,
                 );
                 let orch2 = orchestrator.clone();
@@ -1015,6 +1043,8 @@ impl NullnetGrpcImpl {
                     server_ethernet,
                     (cd, sd),
                     backend_entry_port,
+                    encryption_key,
+                    dstport,
                     client_egress,
                 );
 

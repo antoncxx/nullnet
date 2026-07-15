@@ -32,10 +32,21 @@ pub(crate) trait NetExt {
         remote: IpAddr,
         docker_containers: (Option<String>, Option<String>),
         dnat_port: Option<u32>,
+        encryption_key: [u8; 32],
+        dstport: Option<u32>,
         egress: EgressRole,
     ) -> Option<(Ipv4Addr, NetMessage)>;
 
-    fn teardown(self, net_id: u32, side: &str, docker_container: Option<String>) -> NetMessage;
+    #[allow(clippy::too_many_arguments)]
+    fn teardown(
+        self,
+        net_id: u32,
+        side: &str,
+        docker_container: Option<String>,
+        local_ip: IpAddr,
+        remote_ip: IpAddr,
+        dstport: Option<u16>,
+    ) -> NetMessage;
 }
 
 impl NetExt for Net {
@@ -48,10 +59,19 @@ impl NetExt for Net {
         remote: IpAddr,
         docker_containers: (Option<String>, Option<String>),
         dnat_port: Option<u32>,
+        encryption_key: [u8; 32],
+        dstport: Option<u32>,
         egress: EgressRole,
     ) -> Option<(Ipv4Addr, NetMessage)> {
         match self {
-            Net::Vlan => vlan_setup(msg_id, dest, remote_server_name, net_id, remote),
+            Net::Vlan => vlan_setup(
+                msg_id,
+                dest,
+                remote_server_name,
+                net_id,
+                remote,
+                encryption_key,
+            ),
             Net::Vxlan => vxlan_setup(
                 msg_id,
                 dest,
@@ -60,12 +80,22 @@ impl NetExt for Net {
                 remote,
                 docker_containers,
                 dnat_port,
+                encryption_key,
+                dstport.unwrap_or(0),
                 egress,
             ),
         }
     }
 
-    fn teardown(self, net_id: u32, side: &str, docker_container: Option<String>) -> NetMessage {
+    fn teardown(
+        self,
+        net_id: u32,
+        side: &str,
+        docker_container: Option<String>,
+        local_ip: IpAddr,
+        remote_ip: IpAddr,
+        dstport: Option<u16>,
+    ) -> NetMessage {
         match self {
             Net::Vlan => NetMessage {
                 message: Some(net_message::Message::VlanTeardown(VlanTeardown {
@@ -78,6 +108,9 @@ impl NetExt for Net {
                     ns_name: format!("ns_{net_id}_{side}"),
                     br_name: format!("br_{net_id}_{side}"),
                     docker_container,
+                    local_ip: local_ip.to_string(),
+                    remote_ip: remote_ip.to_string(),
+                    dstport: u32::from(dstport.unwrap_or(0)),
                 })),
             },
         }
@@ -91,6 +124,7 @@ fn vlan_setup(
     remote_server_name: Option<String>,
     vlan_id: u32,
     remote: IpAddr,
+    encryption_key: [u8; 32],
 ) -> Option<(Ipv4Addr, NetMessage)> {
     // Map vlan_id to a /30 block within 10.0.0.0/8.
     // Each ID gets 4 IPs (2 usable), with 2 IPs used for server/client veth.
@@ -124,6 +158,7 @@ fn vlan_setup(
                 local_ip: dest.to_string(),
                 remote_ip: remote.to_string(),
                 host_mapping,
+                encryption_key: encryption_key.to_vec(),
             })),
         },
     ))
@@ -138,6 +173,8 @@ fn vxlan_setup(
     remote: IpAddr,
     docker_containers: (Option<String>, Option<String>),
     dnat_port: Option<u32>,
+    encryption_key: [u8; 32],
+    dstport: u32,
     egress: EgressRole,
 ) -> Option<(Ipv4Addr, NetMessage)> {
     // Map vxlan_id to a /29 block within 10.0.0.0/8.
@@ -204,6 +241,8 @@ fn vxlan_setup(
                 host_mapping,
                 docker_container,
                 dnat_port,
+                encryption_key: encryption_key.to_vec(),
+                dstport,
                 egress_steer,
                 egress_intercept,
             })),

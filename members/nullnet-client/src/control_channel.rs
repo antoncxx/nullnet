@@ -1,5 +1,5 @@
 use crate::commands::{RtNetLinkHandle, configure_access_port, dnat, egress, remove_vlan};
-use crate::ebpf::{FirewallPeers, NetId};
+use crate::ebpf::{FirewallPeers, FirewallVxlanPorts, NetId};
 use crate::egress_state::{EgressRecord, EgressState};
 use crate::host_mappings::HostMappingsState;
 use crate::peers::peer::{Peers, VethKey};
@@ -32,6 +32,7 @@ fn fire_event(grpc: &NullnetGrpcInterface, kind: AgentEventKind) {
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn control_channel(
     server: NullnetGrpcInterface,
     peers: Arc<RwLock<Peers>>,
@@ -39,6 +40,7 @@ pub(crate) async fn control_channel(
     triggers_state: Arc<TriggersState>,
     host_mappings_state: Arc<HostMappingsState>,
     firewall_peers: Arc<FirewallPeers>,
+    firewall_vxlan_ports: Arc<FirewallVxlanPorts>,
     egress_state: Arc<EgressState>,
 ) -> Result<(), Error> {
     let (outbound, grpc_rx) = mpsc::channel(64);
@@ -59,6 +61,7 @@ pub(crate) async fn control_channel(
         let host_mappings_state = host_mappings_state.clone();
         let server = server.clone();
         let firewall_peers = firewall_peers.clone();
+        let firewall_vxlan_ports = firewall_vxlan_ports.clone();
         match message.message {
             Some(net_message::Message::VlanSetup(vlan_setup)) => {
                 tokio::spawn(async move {
@@ -98,6 +101,7 @@ pub(crate) async fn control_channel(
                         host_mappings_state,
                         server,
                         firewall_peers,
+                        firewall_vxlan_ports,
                         egress_state,
                     )
                     .await;
@@ -113,6 +117,7 @@ pub(crate) async fn control_channel(
                         host_mappings_state,
                         server,
                         firewall_peers,
+                        firewall_vxlan_ports,
                         egress_state,
                     );
                 });
@@ -176,6 +181,24 @@ async fn handle_vlan_setup(
                 }),
             );
         })?;
+    // Fail before touching the network if the key is malformed — running
+    // this tunnel without a valid key would mean forwarding traffic in the
+    // clear instead of encrypted.
+    let encryption_key: [u8; 32] = message
+        .encryption_key
+        .try_into()
+        .map_err(|_| "VLAN setup message carried a malformed encryption key")
+        .handle_err(location!())
+        .inspect_err(|e| {
+            fire_event(
+                &grpc,
+                AgentEventKind::VlanSetupFailed(AgentVlanSetupFailed {
+                    vlan_id: message.vlan_id,
+                    local_veth: local_veth.to_string(),
+                    error_reason: e.to_str().to_string(),
+                }),
+            );
+        })?;
 
     // setup VLAN on this machine
     let init_t = std::time::Instant::now();
@@ -190,11 +213,12 @@ async fn handle_vlan_setup(
         init_t.elapsed().as_millis()
     );
 
-    // register peer
-    peers
-        .write()
-        .await
-        .insert(VethKey::new(remote_veth, vlan_id), remote_ip);
+    // register peer + this tunnel's encryption key
+    {
+        let mut peers = peers.write().await;
+        peers.insert(VethKey::new(remote_veth, vlan_id), remote_ip);
+        peers.insert_key(vlan_id, &encryption_key);
+    }
 
     // allow this peer's data-plane traffic through the host firewall
     firewall_peers.add(NetId::Vlan(vlan_id), remote_ip);
@@ -287,6 +311,7 @@ async fn handle_vxlan_setup(
     host_mappings_state: Arc<HostMappingsState>,
     grpc: NullnetGrpcInterface,
     firewall_peers: Arc<FirewallPeers>,
+    firewall_vxlan_ports: Arc<FirewallVxlanPorts>,
     egress_state: Arc<EgressState>,
 ) -> Result<(), Error> {
     let egress_steer = message.egress_steer.unwrap_or(false);
@@ -314,10 +339,40 @@ async fn handle_vxlan_setup(
         .remote_ip
         .parse::<Ipv4Addr>()
         .handle_err(location!())?;
+    // Fail before touching the network if the key is malformed — running
+    // this tunnel without a valid key would mean forwarding traffic in the
+    // clear instead of encrypted.
+    let encryption_key: [u8; 32] = message
+        .encryption_key
+        .try_into()
+        .map_err(|_| "VXLAN setup message carried a malformed encryption key")
+        .handle_err(location!())
+        .inspect_err(|e| {
+            fire_event(
+                &grpc,
+                AgentEventKind::VxlanSetupFailed(AgentVxlanSetupFailed {
+                    vxlan_id,
+                    ns_name: ns_name.clone(),
+                    error_code: -1,
+                }),
+            );
+            eprintln!("[vxlan_setup] {}", e.to_str());
+        })?;
 
     // allow this peer's data-plane (VXLAN underlay) traffic through the host
     // firewall before the tunnel comes up, so the first packets aren't dropped.
     firewall_peers.add(NetId::Vxlan(vxlan_id), remote_ip);
+
+    // also allow this tunnel's own per-tunnel dstport: the eBPF firewall's
+    // static data-plane check only knows the fixed 4789/9999 ports, not the
+    // dynamically-allocated dstport each VXLAN tunnel gets (see
+    // nullnet-server's `UdpPortPool`), so without this every packet on a real
+    // tunnel — cross-host VXLAN encapsulation, including the overlay ARP that
+    // has to succeed before any TCP connection can be routed — is silently
+    // dropped at this host's NIC.
+    if let Ok(dstport) = u16::try_from(message.dstport) {
+        firewall_vxlan_ports.add(vxlan_id, dstport);
+    }
 
     // setup VXLAN on this machine (optionally attaching a Docker container)
     let init_t = std::time::Instant::now();
@@ -328,7 +383,9 @@ async fn handle_vxlan_setup(
         .arg(&br_name)
         .arg(br_net.to_string())
         .arg(local_ip.to_string())
-        .arg(remote_ip.to_string());
+        .arg(remote_ip.to_string())
+        .arg(hex_encode(&encryption_key))
+        .arg(message.dstport.to_string());
     // Egress-steer edges keep their tunnel endpoint in the host root namespace
     // (no `docker_container` arg) so the initiator container's *forwarded*
     // external traffic can be policy-routed into the bridge. Other edges attach
@@ -529,6 +586,7 @@ fn handle_vxlan_teardown(
     host_mappings_state: Arc<HostMappingsState>,
     grpc: NullnetGrpcInterface,
     firewall_peers: Arc<FirewallPeers>,
+    firewall_vxlan_ports: Arc<FirewallVxlanPorts>,
     egress_state: Arc<EgressState>,
 ) {
     // reverse egress steering/interception if this was an egress edge
@@ -547,6 +605,9 @@ fn handle_vxlan_teardown(
 
     // drop this peer's firewall allowance (refcounted; only removed if unused)
     firewall_peers.remove(NetId::Vxlan(message.vxlan_id));
+
+    // drop this tunnel's per-tunnel dstport allowance
+    firewall_vxlan_ports.remove(message.vxlan_id);
 
     // remove DNAT before tearing the tunnel down so existing flows reset
     // cleanly. The `container_ip` matches the `-s` we used at install time.
@@ -583,7 +644,12 @@ fn handle_vxlan_teardown(
     let br_name = message.br_name;
 
     let mut cmd = std::process::Command::new("./vxlan_scripts/vxlan-teardown.sh");
-    cmd.arg(vxlan_id.to_string()).arg(&ns_name).arg(&br_name);
+    cmd.arg(vxlan_id.to_string())
+        .arg(&ns_name)
+        .arg(&br_name)
+        .arg(&message.local_ip)
+        .arg(&message.remote_ip)
+        .arg(message.dstport.to_string());
     if let Some(container) = &message.docker_container {
         cmd.arg(container);
     }
@@ -833,4 +899,10 @@ fn remove_hosts_entry(content: &str, name: &str) -> String {
         .map(ToString::to_string)
         .collect();
     lines.join("\n") + "\n"
+}
+
+/// Lowercase hex encoding, used to pass the tunnel's AES key to
+/// `vxlan-setup.sh`/`vxlan-teardown.sh` as a shell argument.
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

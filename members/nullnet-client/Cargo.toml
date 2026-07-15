@@ -22,5 +22,6 @@ network-interface = "2.0.5"
 gag.workspace = true
 chrono.workspace = true
 nfq = "0.2"
+aes-gcm = "0.10"
 aya = "0.13"
 libc = "0.2"

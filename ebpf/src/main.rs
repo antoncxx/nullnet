@@ -25,6 +25,13 @@ use network_types::{
 //   - ARP                          (next-hop resolution)
 //   - TCP to/from SERVER_IP:PORT   (nullnet control plane / gRPC)
 //   - UDP 4789/9999 to/from a peer (nullnet data plane: VXLAN / forward)
+//   - UDP on a live tunnel's per-tunnel VXLAN dstport, to/from a peer (each
+//     VXLAN tunnel gets its own dynamically-allocated dstport instead of the
+//     shared 4789 default; VXLAN_PORTS is populated/depopulated by the control
+//     channel alongside PEERS as tunnels come and go)
+//   - ESP (proto 50) to/from a peer: cross-host VXLAN tunnels are wrapped in
+//     kernel IPsec/ESP (see vxlan-setup.sh); ESP is portless like ICMP, so it's
+//     scoped to known peers instead of a port check
 // Stateful additions:
 //   - any packet whose flow is already in the CT map is allowed (established
 //     return); every allowed non-ARP packet (re)inserts its canonical 5-tuple,
@@ -45,10 +52,18 @@ const FORWARD_PORT: u16 = 9999;
 
 const PROTO_TCP: u8 = 6;
 const PROTO_UDP: u8 = 17;
+const PROTO_ESP: u8 = 50;
 
 // Allowlist of peer underlay IPs (host-order `u32::from(Ipv4Addr)` keys).
 #[map]
 static PEERS: HashMap<u32, u8> = HashMap::with_max_entries(4096, 0);
+
+// Per-tunnel VXLAN dstports currently in use. Each live tunnel gets its own
+// dynamically-allocated dstport (see nullnet-server's `UdpPortPool`) instead
+// of the shared 4789 default, so this is what lets `data_plane()` recognize
+// that traffic without widening the static ALLOW_PORTS operator policy.
+#[map]
+static VXLAN_PORTS: HashMap<u16, u8> = HashMap::with_max_entries(4096, 0);
 
 // Per-direction, per-proto destination-port allowlist. Key packs direction and
 // protocol alongside the port (see `allow_key`) so ingress/egress and TCP/UDP of
@@ -145,6 +160,10 @@ fn try_firewall(ctx: &TcContext, is_egress: bool) -> Result<i32, ()> {
                 // ICMP is portless and always allowed (echo + PMTUD/errors, both
                 // directions). Not CT-tracked. Simpler than gating it for now.
                 IpProto::Icmp => return Ok(TC_ACT_OK),
+                // ESP (cross-host VXLAN IPsec) is portless too, but unlike ICMP
+                // it carries real tunnel data, so it stays peer-scoped rather
+                // than unconditionally allowed — see the PROTO_ESP check below.
+                IpProto::Esp => (PROTO_ESP, 0u16, 0u16),
                 _ => return Ok(TC_ACT_SHOT),
             };
 
@@ -161,7 +180,7 @@ fn try_firewall(ctx: &TcContext, is_egress: bool) -> Result<i32, ()> {
 }
 
 // Base (stateless) allow decision, scoped by direction and node role.
-#[inline]
+#[inline(always)]
 fn base_allow(
     is_egress: bool,
     proto: u8,
@@ -174,6 +193,9 @@ fn base_allow(
         return true;
     }
     if proto == PROTO_UDP && data_plane(src, dst, src_port, dst_port) {
+        return true;
+    }
+    if proto == PROTO_ESP && (is_peer(src) || is_peer(dst)) {
         return true;
     }
     // Gateway outbound: it is the internet boundary — allow all, track it.
@@ -193,19 +215,27 @@ fn control_plane(src: u32, dst: u32, src_port: u16, dst_port: u16) -> bool {
     (dst == server && dst_port == ctrl_port) || (src == server && src_port == ctrl_port)
 }
 
-// Data plane: UDP on the VXLAN (4789) or forward (9999) port with a known peer.
+// Data plane: UDP on the VXLAN (4789), forward (9999), or a live tunnel's own
+// per-tunnel dstport, with a known peer.
 #[inline]
 fn data_plane(src: u32, dst: u32, src_port: u16, dst_port: u16) -> bool {
     let on_data_port = dst_port == VXLAN_PORT
         || src_port == VXLAN_PORT
         || dst_port == FORWARD_PORT
-        || src_port == FORWARD_PORT;
+        || src_port == FORWARD_PORT
+        || is_vxlan_port(dst_port)
+        || is_vxlan_port(src_port);
     on_data_port && (is_peer(src) || is_peer(dst))
 }
 
 #[inline]
 fn is_peer(ip: u32) -> bool {
     unsafe { PEERS.get(&ip) }.is_some()
+}
+
+#[inline]
+fn is_vxlan_port(port: u16) -> bool {
+    unsafe { VXLAN_PORTS.get(&port) }.is_some()
 }
 
 // Is `port` allowed as a destination in this direction/proto? (ALLOW_PORTS key

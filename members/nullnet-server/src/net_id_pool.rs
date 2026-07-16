@@ -70,6 +70,19 @@ impl NetIdPool {
     }
 }
 
+/// Shared VXLAN dstport for a tunnel that doesn't need a dedicated one from
+/// `UdpPortPool` below — same-host tunnels (MACsec on a veth pair, no XFRM at
+/// all) and unencrypted cross-host tunnels (no XFRM either). A dedicated port
+/// only exists to let an XFRM policy — which selects by IP + port, not VNI —
+/// tell concurrent *encrypted* tunnels between the same host pair apart; the
+/// VNI alone already disambiguates tunnels sharing this port otherwise, so
+/// falling back to it keeps `UdpPortPool`'s 40k entries scoped to only the
+/// tunnels that actually need one, instead of capping total concurrent VXLAN
+/// tunnels at 40k regardless of encryption. Matches the IANA default and the
+/// eBPF firewall's own `VXLAN_PORT` constant (`ebpf/src/main.rs`), which
+/// structurally allows this exact port for any known peer.
+pub(crate) const DEFAULT_VXLAN_DSTPORT: u16 = 4789;
+
 /// Minimum/maximum allocatable UDP port for per-tunnel VXLAN dstports.
 /// Kept out of the IANA ephemeral range (32768-60999) and away from 4789
 /// (the VXLAN default) to avoid colliding with unrelated local sockets.

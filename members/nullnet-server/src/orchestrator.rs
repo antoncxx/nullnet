@@ -45,12 +45,16 @@ pub struct Orchestrator {
     clients: Arc<RwLock<HashMap<IpAddr, OutboundStream>>>,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
     net_id_pool: Arc<Mutex<NetIdPool>>,
-    /// Per-tunnel VXLAN UDP dstport pool. Unused in VLAN mode.
-    udp_port_pool: Arc<Mutex<UdpPortPool>>,
-    /// net_id -> allocated dstport, for VXLAN tunnels only. Lets
-    /// `send_net_teardown` free the port without every call site having to
-    /// thread it through.
-    net_id_ports: Arc<Mutex<HashMap<u32, u16>>>,
+    /// Per-tunnel VXLAN UDP dstport pools, one per host pair rather than one
+    /// global pool — XFRM policies already select by the full (src, dst,
+    /// proto, dport) tuple, so two different host pairs can safely reuse the
+    /// same port number; only concurrent tunnels *between the same two hosts*
+    /// need distinct ports. Unused in VLAN mode.
+    udp_port_pools: Arc<Mutex<HashMap<(IpAddr, IpAddr), UdpPortPool>>>,
+    /// net_id -> (host pair, allocated dstport), for VXLAN tunnels only. Lets
+    /// `send_net_teardown` free the port back into the right pair's pool
+    /// without every call site having to carry it around.
+    net_id_ports: Arc<Mutex<HashMap<u32, ((IpAddr, IpAddr), u16)>>>,
     /// Live egress edges, keyed by initiator replica. Separate from the service
     /// StackMap because the proxy end is infrastructure, not a registered service.
     egress_edges: Arc<RwLock<HashMap<EgressKey, EgressEdge>>>,
@@ -63,7 +67,7 @@ impl Orchestrator {
             clients: Arc::new(RwLock::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
             net_id_pool: Arc::new(Mutex::new(NetIdPool::new())),
-            udp_port_pool: Arc::new(Mutex::new(UdpPortPool::new())),
+            udp_port_pools: Arc::new(Mutex::new(HashMap::new())),
             net_id_ports: Arc::new(Mutex::new(HashMap::new())),
             egress_edges: Arc::new(RwLock::new(HashMap::new())),
             events: EventStore::new(),
@@ -174,14 +178,20 @@ impl Orchestrator {
         };
 
         // One AES-256 key per tunnel, shared by both ends, same as any other
-        // chain edge (skipped when encryption is globally disabled). For
-        // VXLAN, also reserve a per-tunnel UDP dstport so XFRM policies can
-        // tell concurrent tunnels between the same host pair apart (mirrors
-        // net_chain_setup's setup in nullnet_grpc_impl.rs).
+        // chain edge (skipped when encryption is globally disabled). A
+        // dedicated per-tunnel UDP dstport is only needed for XFRM
+        // disambiguation between concurrent *encrypted* tunnels sharing a
+        // host pair; same-host and unencrypted edges fall back to the shared
+        // default port instead (mirrors net_chain_setup's gating in
+        // nullnet_grpc_impl.rs — see DEFAULT_VXLAN_DSTPORT's doc comment).
         let encrypted = *ENCRYPTION_ENABLED;
         let encryption_key = if encrypted { generate_key() } else { [0u8; 32] };
-        let dstport = if *NET_TYPE == Net::Vxlan {
-            match self.allocate_vxlan_port(net_id).await {
+        let needs_dedicated_port = *NET_TYPE == Net::Vxlan && encrypted && proxy_ip != initiator_ip;
+        let dstport = if needs_dedicated_port {
+            match self
+                .allocate_vxlan_port(net_id, proxy_ip, initiator_ip)
+                .await
+            {
                 Some(port) => Some(u32::from(port)),
                 None => {
                     self.free_net_id(net_id).await;
@@ -451,12 +461,27 @@ impl Orchestrator {
         self.net_id_pool.lock().await.free(net_id);
     }
 
-    /// Allocate a per-tunnel VXLAN dstport and remember it against `net_id`
-    /// so `send_net_teardown` can free it later without the caller having to
-    /// carry it around. Only meaningful when `NET_TYPE == Net::Vxlan`.
-    pub(crate) async fn allocate_vxlan_port(&self, net_id: u32) -> Option<u16> {
-        let port = self.udp_port_pool.lock().await.allocate()?;
-        self.net_id_ports.lock().await.insert(net_id, port);
+    /// Allocate a per-tunnel VXLAN dstport from the pool scoped to this
+    /// specific host pair (`host_a`/`host_b`, order-independent — not a
+    /// global pool, see the field doc on `udp_port_pools`), and remember it
+    /// against `net_id` so `send_net_teardown` can free it later without the
+    /// caller having to carry it around. Only meaningful when
+    /// `NET_TYPE == Net::Vxlan`.
+    pub(crate) async fn allocate_vxlan_port(
+        &self,
+        net_id: u32,
+        host_a: IpAddr,
+        host_b: IpAddr,
+    ) -> Option<u16> {
+        let pair = host_pair(host_a, host_b);
+        let port = self
+            .udp_port_pools
+            .lock()
+            .await
+            .entry(pair)
+            .or_insert_with(UdpPortPool::new)
+            .allocate()?;
+        self.net_id_ports.lock().await.insert(net_id, (pair, port));
         Some(port)
     }
 
@@ -479,7 +504,12 @@ impl Orchestrator {
         // Peeked (not removed yet) so both teardown messages can carry the
         // same dstport that was used to install this tunnel's XFRM state;
         // the pool slot itself is freed below, after both sides are notified.
-        let dstport = self.net_id_ports.lock().await.get(&net_id).copied();
+        let dstport = self
+            .net_id_ports
+            .lock()
+            .await
+            .get(&net_id)
+            .map(|(_pair, port)| *port);
         for (dest, remote, side, docker) in [
             (client, server, "c", client_docker),
             (server, client, "s", server_docker),
@@ -494,10 +524,18 @@ impl Orchestrator {
             }
         }
         self.net_id_pool.lock().await.free(net_id);
-        if let Some(port) = self.net_id_ports.lock().await.remove(&net_id) {
-            self.udp_port_pool.lock().await.free(port);
+        if let Some((pair, port)) = self.net_id_ports.lock().await.remove(&net_id)
+            && let Some(pool) = self.udp_port_pools.lock().await.get_mut(&pair)
+        {
+            pool.free(port);
         }
     }
+}
+
+/// Normalize a host pair so both call orders (A, B) and (B, A) land on the
+/// same per-pair port pool.
+fn host_pair(a: IpAddr, b: IpAddr) -> (IpAddr, IpAddr) {
+    if a <= b { (a, b) } else { (b, a) }
 }
 
 #[cfg(test)]
@@ -550,5 +588,75 @@ impl Orchestrator {
         });
 
         log
+    }
+}
+
+#[cfg(test)]
+mod udp_port_pool_tests {
+    use super::*;
+
+    fn ip(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+    }
+
+    #[tokio::test]
+    async fn allocations_within_one_pair_stay_distinct() {
+        let orch = Orchestrator::new();
+        let (host_a, host_b) = (ip(10, 0, 0, 1), ip(10, 0, 0, 2));
+
+        let p1 = orch.allocate_vxlan_port(101, host_a, host_b).await.unwrap();
+        let p2 = orch.allocate_vxlan_port(102, host_a, host_b).await.unwrap();
+
+        assert_ne!(p1, p2);
+    }
+
+    #[tokio::test]
+    async fn different_pairs_can_reuse_the_same_port_number() {
+        let orch = Orchestrator::new();
+
+        // Two entirely separate host pairs, each allocating for the first
+        // time, should each get their own pool's first port - proving the
+        // pools are actually scoped per pair rather than drawn from one
+        // global pool (which would force the second call to skip ahead).
+        let p1 = orch
+            .allocate_vxlan_port(101, ip(10, 0, 0, 1), ip(10, 0, 0, 2))
+            .await
+            .unwrap();
+        let p2 = orch
+            .allocate_vxlan_port(102, ip(10, 0, 0, 3), ip(10, 0, 0, 4))
+            .await
+            .unwrap();
+
+        assert_eq!(p1, p2);
+    }
+
+    #[tokio::test]
+    async fn pair_lookup_is_order_independent() {
+        let orch = Orchestrator::new();
+        let (host_a, host_b) = (ip(10, 0, 0, 1), ip(10, 0, 0, 2));
+
+        // Same two hosts, opposite argument order (as happens naturally: one
+        // edge's setup calls with (server, client), the other with
+        // (proxy, initiator) - either could be first) - must land on the
+        // same pool, not two independent ones.
+        let p1 = orch.allocate_vxlan_port(101, host_a, host_b).await.unwrap();
+        let p2 = orch.allocate_vxlan_port(102, host_b, host_a).await.unwrap();
+
+        assert_ne!(p1, p2);
+    }
+
+    #[tokio::test]
+    async fn teardown_frees_the_port_back_to_its_own_pair_pool() {
+        let orch = Orchestrator::new();
+        let (host_a, host_b) = (ip(10, 0, 0, 1), ip(10, 0, 0, 2));
+
+        let port = orch.allocate_vxlan_port(101, host_a, host_b).await.unwrap();
+        orch.send_net_teardown(host_a, None, host_b, None, 101)
+            .await;
+
+        // The freed port is the lowest available again, so the next
+        // allocation for the same pair reuses it rather than advancing.
+        let reused = orch.allocate_vxlan_port(102, host_a, host_b).await.unwrap();
+        assert_eq!(port, reused);
     }
 }

@@ -20,6 +20,17 @@ function flagEmoji(cc?: string): string {
   return String.fromCodePoint(base + u.charCodeAt(0) - 65, base + u.charCodeAt(1) - 65);
 }
 
+const regionNames = new Intl.DisplayNames(['en'], { type: 'region' });
+
+/// Full country name for the flag tooltip; falls back to the raw code.
+function countryName(cc: string): string {
+  try {
+    return regionNames.of(cc.toUpperCase()) ?? cc.toUpperCase();
+  } catch {
+    return cc.toUpperCase();
+  }
+}
+
 /// Render the contacted-destination list for a single egress edge.
 function DestinationList({ destinations }: { destinations: EgressDestination[] }) {
   if (destinations.length === 0) {
@@ -32,23 +43,26 @@ function DestinationList({ destinations }: { destinations: EgressDestination[] }
   return (
     <table style={{ borderCollapse: 'collapse', width: '100%', fontFamily: "'JetBrains Mono',monospace" }}>
       <tbody>
-        {destinations.map(d => {
+        {destinations.map((d, i) => {
           const flag = flagEmoji(d.country_code);
+          // thin rule between entries (not above the first)
+          const sep = i > 0 ? { borderTop: '1px solid rgba(255,255,255,.07)' } : {};
           return (
             <tr key={d.ip}>
-              <td style={{ paddingRight: 8, paddingTop: 3, wordBreak: 'break-all', verticalAlign: 'top' }}>
+              <td style={{ ...sep, paddingRight: 8, paddingTop: 5, paddingBottom: 4, wordBreak: 'break-all', verticalAlign: 'top' }}>
                 <div style={{ fontSize: 10, color: '#a78bfa' }}>
-                  {flag && <span style={{ marginRight: 5 }}>{flag}</span>}
-                  {d.ip}
-                  {d.country_code && (
-                    <span style={{ color: 'var(--t1)', marginLeft: 5 }}>{d.country_code.toUpperCase()}</span>
+                  {flag && (
+                    <span title={countryName(d.country_code!)} style={{ marginRight: 5, cursor: 'default' }}>
+                      {flag}
+                    </span>
                   )}
+                  {d.ip}
                 </div>
                 {d.org && (
                   <div style={{ fontSize: 9, color: 'var(--t2)', marginTop: 1 }}>{d.org}</div>
                 )}
               </td>
-              <td style={{ fontSize: 9.5, color: 'var(--t1)', textAlign: 'right', whiteSpace: 'nowrap', verticalAlign: 'top', paddingTop: 3 }}>
+              <td style={{ ...sep, fontSize: 9.5, color: 'var(--t1)', textAlign: 'right', whiteSpace: 'nowrap', verticalAlign: 'top', paddingTop: 5, paddingBottom: 4 }}>
                 ×{d.count} · {formatTime(d.last_seen)}
               </td>
             </tr>
@@ -143,7 +157,7 @@ export default function EdgePanel({ edges }: Props) {
             </div>
             {e.egress && (
               <>
-                <div style={{ fontSize: 10, color: '#a78bfa', fontFamily: "'JetBrains Mono',monospace", marginBottom: 4 }}>
+                <div style={{ fontSize: 10, color: '#a78bfa', fontFamily: "'JetBrains Mono',monospace", paddingBottom: 7, borderBottom: '1px solid var(--gb)', marginBottom: 3 }}>
                   {e.from} → {e.to} → {(e.destinations?.length ?? 0)} dest
                 </div>
                 <DestinationList destinations={e.destinations ?? []} />

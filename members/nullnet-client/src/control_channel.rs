@@ -389,7 +389,15 @@ async fn handle_vxlan_setup(
     // has to succeed before any TCP connection can be routed — is silently
     // dropped at this host's NIC. Paired with `remote_ip` specifically, so a
     // different concurrent tunnel's peer can't satisfy this port.
-    if let Ok(dstport) = u16::try_from(message.dstport) {
+    //
+    // Skipped for the shared default port (same-host or unencrypted edges —
+    // see nullnet-server's DEFAULT_VXLAN_DSTPORT doc comment): that port is
+    // legitimately reused by many concurrent tunnels at once, so it can't be
+    // paired to one specific peer here — it's already allowed via the eBPF
+    // firewall's own VXLAN_PORT constant check instead (any known peer).
+    if let Ok(dstport) = u16::try_from(message.dstport)
+        && dstport != crate::DEFAULT_VXLAN_DSTPORT
+    {
         firewall_vxlan_ports.add(vxlan_id, dstport, remote_ip);
     }
 

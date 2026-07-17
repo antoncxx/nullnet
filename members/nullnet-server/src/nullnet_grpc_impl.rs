@@ -996,15 +996,24 @@ impl NullnetGrpcImpl {
 
                 // One AES-256 key per tunnel, handed identically to both
                 // endpoints below (skipped when encryption is globally
-                // disabled). For VXLAN, also reserve a per-tunnel UDP dstport
-                // so the two hosts' XFRM policies can tell this tunnel apart
-                // from any other concurrent tunnel between the same physical
-                // host pair — allocated regardless of encryption, for
-                // simplicity.
+                // disabled). A dedicated per-tunnel UDP dstport is only
+                // needed so the two hosts' XFRM policies can tell this
+                // tunnel apart from other concurrent *encrypted* tunnels
+                // between the same host pair — same-host tunnels (MACsec on
+                // a veth, no XFRM) and unencrypted ones (no XFRM either) fall
+                // back to the shared default port instead. The 40k-entry pool
+                // is also scoped per host pair (see `Orchestrator::allocate_vxlan_port`),
+                // not global, so it only actually caps concurrent encrypted
+                // tunnels between the same two hosts.
                 let encrypted = *ENCRYPTION_ENABLED;
                 let encryption_key = if encrypted { generate_key() } else { [0u8; 32] };
-                let dstport = if *NET_TYPE == Net::Vxlan {
-                    match orchestrator.allocate_vxlan_port(net_id).await {
+                let needs_dedicated_port =
+                    *NET_TYPE == Net::Vxlan && encrypted && server_ethernet != client_ethernet;
+                let dstport = if needs_dedicated_port {
+                    match orchestrator
+                        .allocate_vxlan_port(net_id, server_ethernet, client_ethernet)
+                        .await
+                    {
                         Some(port) => Some(u32::from(port)),
                         None => {
                             eprintln!("UDP port pool exhausted");

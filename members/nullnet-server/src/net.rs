@@ -1,3 +1,4 @@
+use crate::net_id_pool::DEFAULT_VXLAN_DSTPORT;
 use ipnetwork::Ipv4Network;
 use nullnet_grpc_lib::nullnet_grpc::{
     HostMapping, MsgId, Net, NetMessage, VlanSetup, VlanTeardown, VxlanSetup, VxlanTeardown,
@@ -84,7 +85,7 @@ impl NetExt for Net {
                 docker_containers,
                 dnat_port,
                 encryption_key,
-                dstport.unwrap_or(0),
+                dstport.unwrap_or(u32::from(DEFAULT_VXLAN_DSTPORT)),
                 encrypted,
                 egress,
             ),
@@ -114,7 +115,7 @@ impl NetExt for Net {
                     docker_container,
                     local_ip: local_ip.to_string(),
                     remote_ip: remote_ip.to_string(),
-                    dstport: u32::from(dstport.unwrap_or(0)),
+                    dstport: u32::from(dstport.unwrap_or(DEFAULT_VXLAN_DSTPORT)),
                 })),
             },
         }

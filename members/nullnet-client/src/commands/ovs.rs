@@ -85,6 +85,8 @@ impl OvsCommand<'_> {
             .map(ToString::to_string)
             .collect(),
             OvsCommand::AddAccessRedirectFlow(dev, vlan) => [
+                "-O",
+                "OpenFlow13",
                 "add-flow",
                 "br0",
                 &format!(

@@ -8,6 +8,15 @@ use rtnetlink::packet_route::route::{RouteAttribute, RouteHeader};
 use rtnetlink::{Handle, LinkUnspec, LinkVeth, RouteMessageBuilder};
 use std::net::{IpAddr, Ipv4Addr};
 
+/// Matches `vxlan-setup.sh`'s `OVERLAY_MTU`: this environment's physical
+/// underlay (likely the host's own SDN/overlay layer) adds enough hidden
+/// overhead that a full 1500-byte frame gets silently dropped past a
+/// measured ~1104-byte ceiling. VLAN tunnels share the same physical path,
+/// so the veth pair carrying a tunnel's traffic needs the same shrink —
+/// otherwise a large enough frame (e.g. an SSH KEX packet) vanishes with no
+/// error on either end.
+const VLAN_VETH_MTU: u32 = 1080;
+
 #[derive(Debug)]
 pub(super) enum NetLinkCommand<'a> {
     HandleVethPairCreation(Ipv4Network, &'a str, &'a str),
@@ -68,9 +77,9 @@ async fn handle_veth_pair_creation(
     let veth = get_link_by_name(handle, veth_name).await?;
     let veth_peer = get_link_by_name(handle, veth_peer_name).await?;
 
-    // set both ends of the veth pair up
+    // shrink both ends to VLAN_VETH_MTU and set them up
     for link in [&veth, &veth_peer] {
-        set_link_up(handle, link).await?;
+        set_link_mtu_up(handle, link, VLAN_VETH_MTU).await?;
     }
 
     // assign the IP address to veth_name
@@ -204,6 +213,21 @@ async fn get_link_by_name(handle: &Handle, name: &str) -> Result<LinkMessage, Er
 
 async fn set_link_up(handle: &Handle, link: &LinkMessage) -> Result<(), Error> {
     let req = LinkUnspec::new_with_index(link.header.index).up().build();
+    handle
+        .link()
+        .set(req)
+        .execute()
+        .await
+        .handle_err(location!())?;
+
+    Ok(())
+}
+
+async fn set_link_mtu_up(handle: &Handle, link: &LinkMessage, mtu: u32) -> Result<(), Error> {
+    let req = LinkUnspec::new_with_index(link.header.index)
+        .mtu(mtu)
+        .up()
+        .build();
     handle
         .link()
         .set(req)

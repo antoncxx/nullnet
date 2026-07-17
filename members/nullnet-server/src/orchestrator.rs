@@ -40,6 +40,15 @@ pub(crate) struct EgressEdgeInfo {
     pub(crate) proxy_ip: IpAddr,
 }
 
+/// An order-independent pair of underlay host IPs, used to scope per-tunnel
+/// VXLAN dstport allocation (see `Orchestrator::udp_port_pools`) — always
+/// produced via `host_pair()` so both call orders land on the same key.
+type HostPair = (IpAddr, IpAddr);
+
+/// An allocated VXLAN dstport, tagged with which host pair's pool it came
+/// from, so `send_net_teardown` can free it back into the right pool.
+type AllocatedPort = (HostPair, u16);
+
 #[derive(Debug, Clone)]
 pub struct Orchestrator {
     clients: Arc<RwLock<HashMap<IpAddr, OutboundStream>>>,
@@ -50,11 +59,11 @@ pub struct Orchestrator {
     /// proto, dport) tuple, so two different host pairs can safely reuse the
     /// same port number; only concurrent tunnels *between the same two hosts*
     /// need distinct ports. Unused in VLAN mode.
-    udp_port_pools: Arc<Mutex<HashMap<(IpAddr, IpAddr), UdpPortPool>>>,
-    /// net_id -> (host pair, allocated dstport), for VXLAN tunnels only. Lets
-    /// `send_net_teardown` free the port back into the right pair's pool
-    /// without every call site having to carry it around.
-    net_id_ports: Arc<Mutex<HashMap<u32, ((IpAddr, IpAddr), u16)>>>,
+    udp_port_pools: Arc<Mutex<HashMap<HostPair, UdpPortPool>>>,
+    /// net_id -> allocated dstport (with its host pair), for VXLAN tunnels
+    /// only. Lets `send_net_teardown` free the port back into the right
+    /// pair's pool without every call site having to carry it around.
+    net_id_ports: Arc<Mutex<HashMap<u32, AllocatedPort>>>,
     /// Live egress edges, keyed by initiator replica. Separate from the service
     /// StackMap because the proxy end is infrastructure, not a registered service.
     egress_edges: Arc<RwLock<HashMap<EgressKey, EgressEdge>>>,
@@ -534,7 +543,7 @@ impl Orchestrator {
 
 /// Normalize a host pair so both call orders (A, B) and (B, A) land on the
 /// same per-pair port pool.
-fn host_pair(a: IpAddr, b: IpAddr) -> (IpAddr, IpAddr) {
+fn host_pair(a: IpAddr, b: IpAddr) -> HostPair {
     if a <= b { (a, b) } else { (b, a) }
 }
 

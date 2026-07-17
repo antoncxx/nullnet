@@ -498,10 +498,6 @@ impl Orchestrator {
         self.clients.read().await.keys().copied().collect()
     }
 
-    pub(crate) async fn pool_stats(&self) -> (u32, u32) {
-        self.net_id_pool.lock().await.stats()
-    }
-
     pub(crate) async fn send_net_teardown(
         &self,
         client: IpAddr,

@@ -15,7 +15,6 @@ mod events_stream;
 mod graph;
 mod health;
 mod nodes;
-mod pool;
 mod services;
 mod sessions;
 mod stacks;
@@ -36,7 +35,6 @@ pub async fn serve(state: AppState) {
         .route("/api/stacks", get(stacks::stacks_handler))
         .route("/api/services/{stack}", get(services::services_handler))
         .route("/api/nodes/{stack}", get(nodes::nodes_handler))
-        .route("/api/pool", get(pool::pool_handler))
         .route("/api/config/{stack}", get(config::config_handler))
         .route("/api/graph/{stack}", get(graph::graph_handler))
         .route("/api/sessions/{stack}", get(sessions::list_handler))

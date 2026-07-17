@@ -30,12 +30,6 @@ export interface NodeJson {
   hosted_services: HostedServiceJson[];
 }
 
-export interface PoolJson {
-  total: number;
-  in_use: number;
-  free: number;
-}
-
 export interface SessionJson {
   id: number;
   network_id: number;

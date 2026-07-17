@@ -4,7 +4,7 @@ import { useApi } from '../hooks/useApi';
 import type { SessionJson } from '../types';
 import { useRef, useState, useEffect } from 'react';
 
-type Page = 'dashboard' | 'topology' | 'services' | 'nodes' | 'sessions' | 'pool' | 'config' | 'certificates' | 'events';
+type Page = 'dashboard' | 'topology' | 'services' | 'nodes' | 'sessions' | 'config' | 'certificates' | 'events';
 
 interface Props {
   page: Page;
@@ -26,7 +26,6 @@ const NAV = [
       { id: 'services', icon: '◈', label: 'Services', to: '/services' },
       { id: 'sessions', icon: '⌾', label: 'Sessions', to: '/sessions', live: true },
       { id: 'nodes', icon: '◉', label: 'Nodes', to: '/nodes' },
-      { id: 'pool', icon: '▦', label: 'Pool', to: '/pool' },
     ],
   },
   {

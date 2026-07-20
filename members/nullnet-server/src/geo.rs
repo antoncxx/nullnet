@@ -42,10 +42,15 @@ impl GeoInfo {
 pub(crate) struct GeoCache {
     /// `None` if the handler failed to init — `ensure`/`get` then no-op.
     handler: Option<Arc<IpInfoHandler>>,
-    /// Presence = "looked up" (value may be empty on miss/error → not re-looked).
+    /// Presence = "looked up". Empty results are cached only on the API path
+    /// (see `cache_empty`); the free fallback leaves them uncached to retry.
     cache: Arc<Mutex<HashMap<Ipv4Addr, GeoInfo>>>,
     /// IPs with a lookup in flight, so concurrent `ensure`s collapse to one call.
     inflight: Arc<Mutex<HashSet<Ipv4Addr>>>,
+    /// Cache empty/failed lookups? True on the API path (bounds credit use);
+    /// false on the db-ip fallback, whose dbs load async at startup — caching an
+    /// empty during that blind window pins the miss forever, and re-reads are free.
+    cache_empty: bool,
 }
 
 // `IpInfoHandler` isn't `Debug`; `Orchestrator` derives it, so provide a terse one.
@@ -60,10 +65,12 @@ impl std::fmt::Debug for GeoCache {
 
 impl GeoCache {
     pub(crate) fn from_env() -> Self {
+        let (handler, cache_empty) = build_handler();
         Self {
-            handler: build_handler().map(Arc::new),
+            handler: handler.map(Arc::new),
             cache: Arc::new(Mutex::new(HashMap::new())),
             inflight: Arc::new(Mutex::new(HashSet::new())),
+            cache_empty,
         }
     }
 
@@ -81,6 +88,7 @@ impl GeoCache {
         let handler = handler.clone();
         let cache = self.cache.clone();
         let inflight = self.inflight.clone();
+        let cache_empty = self.cache_empty;
         tokio::spawn(async move {
             let info = match handler.lookup(&ip.to_string()).await {
                 Ok(i) => GeoInfo {
@@ -90,10 +98,12 @@ impl GeoCache {
                 },
                 Err(e) => {
                     eprintln!("[geo] lookup {ip} failed: {e:?}");
-                    GeoInfo::default() // cache the miss so we don't re-charge
+                    GeoInfo::default()
                 }
             };
-            cache.lock().unwrap().insert(ip, info);
+            if !info.is_empty() || cache_empty {
+                cache.lock().unwrap().insert(ip, info);
+            }
             inflight.lock().unwrap().remove(&ip);
         });
     }
@@ -124,10 +134,12 @@ impl GeoCache {
                     },
                     Err(e) => {
                         eprintln!("[geo] lookup {ip} failed: {e:?}");
-                        GeoInfo::default() // cache the miss so we don't re-charge
+                        GeoInfo::default()
                     }
                 };
-                self.cache.lock().unwrap().insert(ip, info.clone());
+                if !info.is_empty() || self.cache_empty {
+                    self.cache.lock().unwrap().insert(ip, info.clone());
+                }
                 self.inflight.lock().unwrap().remove(&ip);
                 return (!info.is_empty()).then_some(info);
             }
@@ -149,15 +161,18 @@ fn leak_env(var: &str, default: &'static str) -> &'static str {
 /// Build the handler from env. `IPINFO_API_URL` (with `{ip}`/`{api_key}`
 /// placeholders) + `IPINFO_API_KEY` select an API provider; the
 /// `IPINFO_FIELD_{COUNTRY,ASN,ORG}` vars map its JSON response fields. Unset →
-/// libipinfo's free db-ip.com fallback.
-fn build_handler() -> Option<IpInfoHandler> {
-    let providers = match std::env::var("IPINFO_API_URL") {
+/// libipinfo's free db-ip.com fallback. Returns `(handler, is_api)`; `is_api`
+/// drives whether empty lookups are cached (see `GeoCache::cache_empty`).
+fn build_handler() -> (Option<IpInfoHandler>, bool) {
+    let (providers, is_api) = match std::env::var("IPINFO_API_URL") {
         Ok(url) if !url.trim().is_empty() => {
             let api_key = std::env::var("IPINFO_API_KEY").unwrap_or_default();
+            // ApiFields are JSON Pointers — the leading slash is required, or
+            // extraction silently yields nothing.
             let fields = ApiFields {
-                country: Some(leak_env("IPINFO_FIELD_COUNTRY", "country")),
-                asn: Some(leak_env("IPINFO_FIELD_ASN", "asn")),
-                org: Some(leak_env("IPINFO_FIELD_ORG", "org")),
+                country: Some(leak_env("IPINFO_FIELD_COUNTRY", "/country")),
+                asn: Some(leak_env("IPINFO_FIELD_ASN", "/asn")),
+                org: Some(leak_env("IPINFO_FIELD_ORG", "/org")),
                 continent_code: None,
                 city: None,
                 region: None,
@@ -165,22 +180,26 @@ fn build_handler() -> Option<IpInfoHandler> {
                 timezone: None,
             };
             println!("[geo] using API provider {}", url.trim());
-            vec![IpInfoProvider::new_api_provider(
-                url.trim(),
-                &api_key,
-                fields,
-            )]
+            (
+                vec![IpInfoProvider::new_api_provider(
+                    url.trim(),
+                    &api_key,
+                    fields,
+                )],
+                true,
+            )
         }
         _ => {
             println!("[geo] IPINFO_API_URL not set; using free db-ip.com fallback");
-            Vec::new()
+            (Vec::new(), false)
         }
     };
-    match IpInfoHandler::new(providers) {
+    let handler = match IpInfoHandler::new(providers) {
         Ok(h) => Some(h),
         Err(e) => {
             eprintln!("[geo] IpInfoHandler init failed: {e:?}; enrichment disabled");
             None
         }
-    }
+    };
+    (handler, is_api)
 }

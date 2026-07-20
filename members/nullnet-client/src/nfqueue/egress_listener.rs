@@ -15,6 +15,7 @@
 //! keyed by the initiator container + `EGRESS_TRIGGER_PORT` (egress is
 //! once-per-container, so a single sentinel-port entry covers all its flows).
 
+use crate::egress_policy::PolicyVerdicts;
 use crate::nfqueue::cache::BridgeIpCache;
 use crate::nfqueue::parse::ipv4_flow;
 use crate::nfqueue::recv_loop::spawn_queue_loop;
@@ -41,6 +42,8 @@ const TRIGGER_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the handler holds the packet waiting for steering to be installed
 /// (`mark_active`) before giving up.
 const STEER_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long the handler waits for the server's egress policy verdict.
+const POLICY_TIMEOUT: Duration = Duration::from_secs(5);
 /// How often the accumulated per-destination counts are flushed to the server.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 /// Cap on distinct destinations tracked per client. Bounds memory for a service
@@ -54,6 +57,8 @@ struct DstAccum {
     count: u64,
     last_seen: u64,
     dirty: bool,
+    /// Whether the latest attempt was denied by the egress country policy.
+    blocked: bool,
 }
 
 /// Pending contacted destinations, keyed by (container, dst_ip). Accumulated per
@@ -76,6 +81,8 @@ struct EgressCtx {
     semaphore: Arc<Semaphore>,
     /// Contacted destinations accumulated locally; the flush task drains this.
     pending: PendingDsts,
+    /// Cached egress country-policy verdicts (server-decided).
+    verdicts: Arc<PolicyVerdicts>,
 }
 
 /// Spawn the egress-trigger recv loop (queue 1). Shares the bridge-IP cache, the
@@ -84,6 +91,7 @@ pub fn spawn_egress_recv_thread(
     grpc: NullnetGrpcInterface,
     cache: BridgeIpCache,
     triggers_state: Arc<TriggersState>,
+    verdicts: Arc<PolicyVerdicts>,
 ) {
     let pending: PendingDsts = Arc::new(Mutex::new(HashMap::new()));
     spawn_flush_task(grpc.clone(), pending.clone());
@@ -95,6 +103,7 @@ pub fn spawn_egress_recv_thread(
             crate::nfqueue::listener::HANDLER_CONCURRENCY,
         )),
         pending,
+        verdicts,
     };
     spawn_queue_loop(
         QUEUE_ID,
@@ -137,11 +146,16 @@ async fn decide_verdict(ctx: &EgressCtx, flow: Option<(Ipv4Addr, Ipv4Addr, u16)>
         return Verdict::Accept;
     };
 
-    // Record this destination before the trigger match, so every NEW external
-    // flow is counted regardless of edge state — the Active branch below accepts
-    // without triggering, so first-flow-only would miss the rest. The flush task
-    // reports the accumulated counts to the server.
-    record_destination(ctx, &container, dst_ip);
+    // Country-policy gate, before the trigger machinery: a denied flow gets no
+    // edge/steering work. Recorded either way (with the blocked flag) so every
+    // NEW external attempt is counted regardless of edge state — the Active
+    // branch below accepts without triggering, so first-flow-only would miss
+    // the rest. The flush task reports the accumulated counts to the server.
+    let allowed = policy_allows(ctx, &container, dst_ip).await;
+    record_destination(ctx, &container, dst_ip, !allowed);
+    if !allowed {
+        return Verdict::Drop;
+    }
 
     match ctx.triggers_state.state(&container, EGRESS_TRIGGER_PORT) {
         TriggerState::Active => Verdict::Accept,
@@ -208,6 +222,39 @@ async fn decide_verdict(ctx: &EgressCtx, flow: Option<(Ipv4Addr, Ipv4Addr, u16)>
     }
 }
 
+/// Whether the egress country policy allows `container` → `dst_ip`. Cached
+/// verdicts (TTL'd) answer without I/O; misses ask the server while the packet
+/// is held. FAIL-CLOSED: an unreachable server or timeout denies the flow —
+/// consistent with the Fresh path, where a failed trigger already drops. RPC
+/// failures are not cached, so the next packet retries.
+async fn policy_allows(ctx: &EgressCtx, container: &str, dst_ip: Ipv4Addr) -> bool {
+    if let Some(allowed) = ctx.verdicts.get(container, dst_ip) {
+        return allowed;
+    }
+    let res = timeout(
+        POLICY_TIMEOUT,
+        ctx.grpc
+            .check_egress_destination(container.to_string(), dst_ip.to_string()),
+    )
+    .await;
+    match res {
+        Ok(Ok(allowed)) => {
+            ctx.verdicts.put(container, dst_ip, allowed);
+            allowed
+        }
+        Ok(Err(e)) => {
+            eprintln!("[egress-nfq] policy check {container} -> {dst_ip}: {e}; failing closed");
+            false
+        }
+        Err(_) => {
+            eprintln!(
+                "[egress-nfq] policy check timeout for {container} -> {dst_ip}; failing closed"
+            );
+            false
+        }
+    }
+}
+
 /// Hold the packet until steering is marked active (or time out and drop it).
 async fn wait_for_steer(ctx: &EgressCtx, container: &str, notify: Arc<Notify>) -> Verdict {
     let notified = notify.notified();
@@ -233,13 +280,14 @@ async fn wait_for_steer(ctx: &EgressCtx, container: &str, notify: Arc<Notify>) -
 /// count and latest-seen time, mark it dirty for the next flush. Bounded by
 /// `MAX_PENDING_DSTS` with least-recently-seen eviction. Cheap and RPC-free —
 /// the flush task does the network work.
-fn record_destination(ctx: &EgressCtx, container: &str, dst_ip: Ipv4Addr) {
+fn record_destination(ctx: &EgressCtx, container: &str, dst_ip: Ipv4Addr, blocked: bool) {
     let now = now_secs();
     let mut pending = ctx.pending.lock().unwrap();
     if let Some(acc) = pending.get_mut(&(container.to_string(), dst_ip)) {
         acc.count += 1;
         acc.last_seen = now;
         acc.dirty = true;
+        acc.blocked = blocked;
         return;
     }
     if pending.len() >= MAX_PENDING_DSTS {
@@ -257,6 +305,7 @@ fn record_destination(ctx: &EgressCtx, container: &str, dst_ip: Ipv4Addr) {
             count: 1,
             last_seen: now,
             dirty: true,
+            blocked,
         },
     );
 }
@@ -281,6 +330,7 @@ fn spawn_flush_task(grpc: NullnetGrpcInterface, pending: PendingDsts) {
                             dst_ip: dst_ip.to_string(),
                             count: a.count,
                             last_seen: a.last_seen,
+                            blocked: a.blocked,
                         }
                     })
                     .collect()

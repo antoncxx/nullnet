@@ -31,6 +31,7 @@ mod cli;
 mod commands;
 mod control_channel;
 mod ebpf;
+mod egress_policy;
 mod egress_state;
 mod env;
 mod forward;
@@ -117,6 +118,14 @@ async fn main() -> Result<(), Error> {
     // remember egress plumbing installed at setup so teardown can reverse it
     let egress_state = Arc::new(egress_state::EgressState::default());
 
+    // bridge-IP → container cache + egress policy-verdict cache, shared by the
+    // NFQUEUE listeners and the control channel (which flushes them when the
+    // server pushes an egress policy change).
+    let bridge_cache = nfqueue::BridgeIpCache::new();
+    let policy_verdicts = Arc::new(egress_policy::PolicyVerdicts::default());
+    let bridge_cache_cc = bridge_cache.clone();
+    let policy_verdicts_cc = policy_verdicts.clone();
+
     // listen on the gRPC control channel
     tokio::spawn(async move {
         if let Err(e) = control_channel(
@@ -127,6 +136,8 @@ async fn main() -> Result<(), Error> {
             host_mappings_state,
             firewall_peers,
             egress_state,
+            bridge_cache_cc,
+            policy_verdicts_cc,
         )
         .await
         {
@@ -158,6 +169,8 @@ async fn main() -> Result<(), Error> {
         triggers_state,
         config_rx,
         docker_changed.clone(),
+        bridge_cache,
+        policy_verdicts,
     );
 
     // declare services + push the port→service map to the NFQUEUE listener

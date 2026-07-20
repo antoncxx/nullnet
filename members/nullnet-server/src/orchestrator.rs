@@ -6,7 +6,7 @@ use crate::net_id_pool::NetIdPool;
 use crate::services::changes::{apply_changes, detect_node_disconnect_changes};
 use crate::services::input::StackMap;
 use nullnet_grpc_lib::nullnet_grpc::{
-    ContainerResume, ContainerSuspend, MsgId, NetMessage, net_message,
+    ContainerResume, ContainerSuspend, EgressPolicyChanged, MsgId, NetMessage, net_message,
 };
 use nullnet_liberror::{Error, ErrorHandler, Location, location};
 use std::collections::HashMap;
@@ -34,6 +34,8 @@ const MAX_DESTS_PER_EDGE: usize = 256;
 struct DestStat {
     last_seen: u64,
     count: u64,
+    /// Whether the latest attempt was denied by the egress country policy.
+    blocked: bool,
 }
 
 /// A live egress forward-proxy edge (initiator replica -> proxy host).
@@ -54,6 +56,8 @@ pub(crate) struct EgressDestination {
     pub(crate) ip: Ipv4Addr,
     pub(crate) last_seen: u64,
     pub(crate) count: u64,
+    /// Whether the latest attempt was denied by the egress country policy.
+    pub(crate) blocked: bool,
     /// Geo/ASN enrichment, if the lookup has resolved yet (else `None`).
     pub(crate) geo: Option<GeoInfo>,
 }
@@ -267,6 +271,7 @@ impl Orchestrator {
                         ip: *ip,
                         last_seen: s.last_seen,
                         count: s.count,
+                        blocked: s.blocked,
                         geo: self.geo.get(*ip),
                     })
                     .collect();
@@ -295,6 +300,7 @@ impl Orchestrator {
         dst_ip: Ipv4Addr,
         count: u64,
         last_seen: u64,
+        blocked: bool,
     ) {
         let key = (initiator_ip, initiator_docker);
         let mut edges = self.egress_edges.write().await;
@@ -307,6 +313,7 @@ impl Orchestrator {
             Some(stat) => {
                 stat.last_seen = last_seen;
                 stat.count = count;
+                stat.blocked = blocked;
             }
             None => {
                 if edge.destinations.len() >= MAX_DESTS_PER_EDGE {
@@ -319,10 +326,26 @@ impl Orchestrator {
                         edge.destinations.remove(&oldest);
                     }
                 }
-                edge.destinations
-                    .insert(dst_ip, DestStat { last_seen, count });
+                edge.destinations.insert(
+                    dst_ip,
+                    DestStat {
+                        last_seen,
+                        count,
+                        blocked,
+                    },
+                );
             }
         }
+    }
+
+    /// Country (uppercase alpha-2) of `ip` for the egress policy check,
+    /// awaiting the (cached, once-per-IP) geo lookup. `None` = unknown.
+    pub(crate) async fn destination_country(&self, ip: Ipv4Addr) -> Option<String> {
+        self.geo
+            .lookup_now(ip)
+            .await?
+            .country_code
+            .map(|c| c.to_uppercase())
     }
 
     /// Tear down every egress edge anchored on `node_ip` (as initiator or proxy).
@@ -447,6 +470,29 @@ impl Orchestrator {
                 message: Some(net_message::Message::ContainerSuspend(ContainerSuspend {
                     docker_container,
                 })),
+            };
+            let _ = outbound.send(Ok(message)).await.handle_err(location!());
+        }
+    }
+
+    /// Fire-and-forget broadcast: an egress country policy changed on a config
+    /// reload. Every client drops its cached policy verdicts and flushes
+    /// conntrack, so live flows re-verdict (newly-denied ones die). Coarse by
+    /// design — reloads are rare and re-verdicting is cheap.
+    pub(crate) async fn broadcast_egress_policy_changed(&self) {
+        let outbounds: Vec<(IpAddr, OutboundStream)> = self
+            .clients
+            .read()
+            .await
+            .iter()
+            .map(|(ip, o)| (*ip, o.clone()))
+            .collect();
+        for (ip, outbound) in outbounds {
+            println!("Notifying {ip} of egress policy change");
+            let message = NetMessage {
+                message: Some(net_message::Message::EgressPolicyChanged(
+                    EgressPolicyChanged {},
+                )),
             };
             let _ = outbound.send(Ok(message)).await.handle_err(location!());
         }

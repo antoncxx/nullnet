@@ -35,6 +35,12 @@ service NullnetGrpc {
   // periodically, so the server holds a live per-service list with counts.
   rpc ReportEgressDestination(EgressDestinationReport) returns (Empty);
 
+  // Per-flow egress country-policy check: the client holds the first packet of a
+  // NEW external flow and asks whether the service may contact this destination.
+  // The server resolves the destination's country (geo cache) and evaluates the
+  // service's allowed_/blocked_countries lists. The client caches verdicts.
+  rpc CheckEgressDestination(EgressPolicyCheck) returns (EgressPolicyVerdict);
+
   // Report an event from a client or proxy agent back to the server.
   rpc ReportEvent(AgentEvent) returns (Empty);
 
@@ -75,8 +81,16 @@ message NetMessage {
     // Docker container suspend (fire-and-forget) and resume (ack'd)
     ContainerSuspend container_suspend = 5;
     ContainerResume container_resume = 6;
+    // Egress country-policy changed on the server (fire-and-forget)
+    EgressPolicyChanged egress_policy_changed = 7;
   }
 }
+
+// A service's egress country lists changed on a config reload. The client
+// drops its cached policy verdicts and flushes conntrack for its registered
+// containers' external flows, so every live flow re-enters the NFQUEUE as NEW
+// and is re-verdicted — flows the new policy denies die on their next packet.
+message EgressPolicyChanged {}
 
 // Pause an idle Docker container: the client runs `docker pause`. No ack —
 // the server treats the replica as suspended optimistically.
@@ -255,6 +269,20 @@ message EgressDestinationEntry {
   uint64 count = 3;
   // Epoch seconds of the most recent connection to this destination.
   uint64 last_seen = 4;
+  // Whether the latest attempt was denied by the egress country policy.
+  bool blocked = 5;
+}
+
+// Egress country-policy check for one held first-packet: which registered
+// replica wants to reach which external destination.
+message EgressPolicyCheck {
+  // Real Docker container name of the initiator replica (as in EgressTrigger).
+  string initiator_container = 1;
+  string dst_ip = 2;
+}
+
+message EgressPolicyVerdict {
+  bool allowed = 1;
 }
 
 // TLS certificates ----------------------------------------------------------------------------------------------------

@@ -50,13 +50,18 @@ function DestinationList({ destinations }: { destinations: EgressDestination[] }
           return (
             <tr key={d.ip}>
               <td style={{ ...sep, paddingRight: 8, paddingTop: 5, paddingBottom: 4, wordBreak: 'break-all', verticalAlign: 'top' }}>
-                <div style={{ fontSize: 10, color: '#a78bfa' }}>
+                <div style={{ fontSize: 10, color: d.blocked ? '#f87171' : '#a78bfa' }}>
                   {flag && (
                     <span title={countryName(d.country_code!)} style={{ marginRight: 5, cursor: 'default' }}>
                       {flag}
                     </span>
                   )}
                   {d.ip}
+                  {d.blocked && (
+                    <span style={{ marginLeft: 6, fontSize: 8.5, border: '1px solid rgba(248,113,113,.4)', borderRadius: 3, padding: '0 4px', letterSpacing: '.05em' }}>
+                      BLOCKED
+                    </span>
+                  )}
                 </div>
                 {d.org && (
                   <div style={{ fontSize: 9, color: 'var(--t2)', marginTop: 1 }}>{d.org}</div>

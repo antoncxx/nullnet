@@ -228,6 +228,7 @@ async fn teardown_invalidated_service(
         let max_nets = si.max_networks();
         let protocol = si.protocol();
         let listen_port = si.listen_port();
+        let egress_policy = si.egress_policy().clone();
         services.insert(
             invalidated_service.to_string(),
             ServiceInfo::new(
@@ -237,6 +238,7 @@ async fn teardown_invalidated_service(
                 max_nets,
                 protocol,
                 listen_port,
+                egress_policy,
             ),
         );
     }

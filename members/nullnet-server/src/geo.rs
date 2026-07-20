@@ -104,6 +104,37 @@ impl GeoCache {
         let info = self.cache.lock().unwrap().get(&ip).cloned()?;
         (!info.is_empty()).then_some(info)
     }
+
+    /// Like `ensure` + `get`, but awaits the result — for the egress policy
+    /// check, which must know the country before verdicting a held packet.
+    /// Same discipline (one lookup per IP ever); waits on a lookup already in
+    /// flight, giving up after ~5s (`None` = unknown, policy decides).
+    pub(crate) async fn lookup_now(&self, ip: Ipv4Addr) -> Option<GeoInfo> {
+        let handler = self.handler.as_ref()?.clone();
+        for _ in 0..100 {
+            if let Some(info) = self.cache.lock().unwrap().get(&ip).cloned() {
+                return (!info.is_empty()).then_some(info);
+            }
+            if self.inflight.lock().unwrap().insert(ip) {
+                let info = match handler.lookup(&ip.to_string()).await {
+                    Ok(i) => GeoInfo {
+                        country_code: i.country,
+                        asn: i.asn,
+                        org: i.org,
+                    },
+                    Err(e) => {
+                        eprintln!("[geo] lookup {ip} failed: {e:?}");
+                        GeoInfo::default() // cache the miss so we don't re-charge
+                    }
+                };
+                self.cache.lock().unwrap().insert(ip, info.clone());
+                self.inflight.lock().unwrap().remove(&ip);
+                return (!info.is_empty()).then_some(info);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        None
+    }
 }
 
 /// Read a JSON-field-name env override, leaked to `'static` (ApiFields needs

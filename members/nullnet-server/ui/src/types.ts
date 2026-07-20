@@ -127,6 +127,8 @@ export interface EgressDestination {
   ip: string;
   last_seen: number;
   count: number;
+  /** Latest attempt denied by the egress country policy. */
+  blocked?: boolean;
   /** ISO alpha-2 country code (for the flag), if resolved. */
   country_code?: string;
   asn?: string;

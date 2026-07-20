@@ -9,13 +9,14 @@ use crate::services::changes::{
 use crate::services::clients::{Client, ClientInfo};
 use crate::services::edge::{Edge, RegisteredEdge};
 use crate::services::input::{ServicesToml, StackMap};
-use crate::services::service_info::{ServiceInfo, backend_involved_services};
+use crate::services::service_info::{EgressPolicy, ServiceInfo, backend_involved_services};
 use crate::timeout::check_timeouts;
 use nullnet_grpc_lib::nullnet_grpc::nullnet_grpc_server::NullnetGrpc;
 use nullnet_grpc_lib::nullnet_grpc::{
-    AgentEvent, BackendTriggerRequest, CertBundle, EgressDestinationReport, EgressTriggerRequest,
-    Empty, MsgId, Net, NetMessage, NetType, PortMapping, PortMappingBundle, ProxyRequest,
-    ServiceTrigger, Services, ServicesListResponse, Upstream, agent_event::Event as AgentEventKind,
+    AgentEvent, BackendTriggerRequest, CertBundle, EgressDestinationReport, EgressPolicyCheck,
+    EgressPolicyVerdict, EgressTriggerRequest, Empty, MsgId, Net, NetMessage, NetType, PortMapping,
+    PortMappingBundle, ProxyRequest, ServiceTrigger, Services, ServicesListResponse, Upstream,
+    agent_event::Event as AgentEventKind,
 };
 use nullnet_liberror::{Error, ErrorHandler, Location, location};
 use std::collections::{HashMap, HashSet};
@@ -845,11 +846,75 @@ impl NullnetGrpcImpl {
                         dst_ip,
                         entry.count,
                         entry.last_seen,
+                        entry.blocked,
                     )
                     .await;
             }
         }
         Ok(Response::new(Empty {}))
+    }
+
+    /// Evaluate the egress country policy for one held first-packet: resolve
+    /// the sender to its registered service, resolve the destination's country
+    /// (awaited, cached once-per-IP), apply the service's lists. Services with
+    /// no policy allow everything without a lookup.
+    async fn check_egress_destination_impl(
+        &self,
+        request: Request<EgressPolicyCheck>,
+    ) -> Result<Response<EgressPolicyVerdict>, Error> {
+        let sender_ip = request
+            .remote_addr()
+            .ok_or("Could not get remote address for egress policy check")
+            .handle_err(location!())?
+            .ip();
+        let req = request.into_inner();
+        let dst_ip: Ipv4Addr = req.dst_ip.parse().handle_err(location!())?;
+        let container = if req.initiator_container.is_empty() {
+            None
+        } else {
+            Some(req.initiator_container.as_str())
+        };
+
+        // One pass over the stacks: find the registered replica and its
+        // service's policy together (mirrors resolve_registered_replica).
+        let resolved: Option<(String, EgressPolicy)> = {
+            let guard = self.services.read().await;
+            guard.values().find_map(|stack_map| {
+                stack_map.iter().find_map(|(name, si)| {
+                    let ServiceInfo::Registered(reg) = si else {
+                        return None;
+                    };
+                    reg.replicas()
+                        .iter()
+                        .any(|r| {
+                            r.ip() == sender_ip
+                                && match container {
+                                    Some(c) => r.docker_container() == Some(c),
+                                    None => true,
+                                }
+                        })
+                        .then(|| (name.clone(), si.egress_policy().clone()))
+                })
+            })
+        };
+        let Some((service_name, policy)) = resolved else {
+            Err("No registered replica matches the egress policy check").handle_err(location!())?
+        };
+
+        let allowed = if policy == EgressPolicy::None {
+            true
+        } else {
+            let country = self.orchestrator.destination_country(dst_ip).await;
+            let allowed = policy.allows(country.as_deref());
+            if !allowed {
+                println!(
+                    "[egress-policy] deny '{service_name}' -> {dst_ip} ({})",
+                    country.as_deref().unwrap_or("unknown country")
+                );
+            }
+            allowed
+        };
+        Ok(Response::new(EgressPolicyVerdict { allowed }))
     }
 
     pub(crate) fn services(&self) -> &Arc<RwLock<StackMap>> {
@@ -1334,6 +1399,15 @@ impl NullnetGrpc for NullnetGrpcImpl {
         req: Request<EgressDestinationReport>,
     ) -> Result<Response<Empty>, Status> {
         self.report_egress_destination_impl(req)
+            .await
+            .map_err(|err| Status::internal(err.to_str()))
+    }
+
+    async fn check_egress_destination(
+        &self,
+        req: Request<EgressPolicyCheck>,
+    ) -> Result<Response<EgressPolicyVerdict>, Status> {
+        self.check_egress_destination_impl(req)
             .await
             .map_err(|err| Status::internal(err.to_str()))
     }

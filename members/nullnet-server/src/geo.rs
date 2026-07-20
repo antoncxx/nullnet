@@ -38,6 +38,46 @@ impl GeoInfo {
     }
 }
 
+/// Upper bound on a single provider lookup. Without it a blackholed geo
+/// endpoint would hang the awaiting caller (a held egress first-packet)
+/// indefinitely; `nullnet-libipinfo`/reqwest sets no default request timeout.
+const LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Removes `ip` from the in-flight set when dropped, so a lookup future that is
+/// cancelled (e.g. the gRPC caller disconnects mid-lookup) or panics can't pin
+/// the IP as permanently in-flight — which would make every later lookup miss,
+/// stall, and report the IP as unknown, silently defeating a country policy.
+struct InflightGuard {
+    inflight: Arc<Mutex<HashSet<Ipv4Addr>>>,
+    ip: Ipv4Addr,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.inflight.lock().unwrap().remove(&self.ip);
+    }
+}
+
+/// One provider lookup, bounded by `LOOKUP_TIMEOUT`; error and timeout both map
+/// to an empty result (caller decides caching + policy on "unknown").
+async fn lookup_geo(handler: &IpInfoHandler, ip: Ipv4Addr) -> GeoInfo {
+    match tokio::time::timeout(LOOKUP_TIMEOUT, handler.lookup(&ip.to_string())).await {
+        Ok(Ok(i)) => GeoInfo {
+            country_code: i.country,
+            asn: i.asn,
+            org: i.org,
+        },
+        Ok(Err(e)) => {
+            eprintln!("[geo] lookup {ip} failed: {e:?}");
+            GeoInfo::default()
+        }
+        Err(_) => {
+            eprintln!("[geo] lookup {ip} timed out after {LOOKUP_TIMEOUT:?}");
+            GeoInfo::default()
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct GeoCache {
     /// `None` if the handler failed to init — `ensure`/`get` then no-op.
@@ -90,21 +130,11 @@ impl GeoCache {
         let inflight = self.inflight.clone();
         let cache_empty = self.cache_empty;
         tokio::spawn(async move {
-            let info = match handler.lookup(&ip.to_string()).await {
-                Ok(i) => GeoInfo {
-                    country_code: i.country,
-                    asn: i.asn,
-                    org: i.org,
-                },
-                Err(e) => {
-                    eprintln!("[geo] lookup {ip} failed: {e:?}");
-                    GeoInfo::default()
-                }
-            };
+            let _guard = InflightGuard { inflight, ip };
+            let info = lookup_geo(&handler, ip).await;
             if !info.is_empty() || cache_empty {
                 cache.lock().unwrap().insert(ip, info);
             }
-            inflight.lock().unwrap().remove(&ip);
         });
     }
 
@@ -126,21 +156,14 @@ impl GeoCache {
                 return (!info.is_empty()).then_some(info);
             }
             if self.inflight.lock().unwrap().insert(ip) {
-                let info = match handler.lookup(&ip.to_string()).await {
-                    Ok(i) => GeoInfo {
-                        country_code: i.country,
-                        asn: i.asn,
-                        org: i.org,
-                    },
-                    Err(e) => {
-                        eprintln!("[geo] lookup {ip} failed: {e:?}");
-                        GeoInfo::default()
-                    }
+                let _guard = InflightGuard {
+                    inflight: self.inflight.clone(),
+                    ip,
                 };
+                let info = lookup_geo(&handler, ip).await;
                 if !info.is_empty() || self.cache_empty {
                     self.cache.lock().unwrap().insert(ip, info.clone());
                 }
-                self.inflight.lock().unwrap().remove(&ip);
                 return (!info.is_empty()).then_some(info);
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;

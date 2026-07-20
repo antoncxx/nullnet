@@ -27,3 +27,15 @@ pub static NET_TYPE: std::sync::LazyLock<Net> = std::sync::LazyLock::new(|| {
         _ => Net::default(),
     }
 });
+
+/// Set to `false`/`0`/`no` to disable per-tunnel VLAN/VXLAN encryption
+/// entirely: VLAN falls back to plain (unencrypted) userspace forwarding,
+/// VXLAN falls back to a bare vxlan/veth link with no XFRM SA/policy or
+/// MACsec. Defaults to enabled, preserving existing behavior when unset —
+/// this is an opt-out, not an opt-in, so it needs its own parser rather than
+/// nullnet-client's `env_bool` (which defaults false/opt-in).
+pub static ENCRYPTION_ENABLED: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| match std::env::var("ENCRYPTION_ENABLED") {
+        Ok(s) => !matches!(s.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"),
+        Err(_) => true,
+    });

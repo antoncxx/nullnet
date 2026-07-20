@@ -89,7 +89,7 @@ fn cert_covers_domain(leaf: &X509Ref, domain: &str) -> bool {
     leaf.subject_name()
         .entries_by_nid(Nid::COMMONNAME)
         .next()
-        .and_then(|e| e.data().as_utf8().ok())
+        .and_then(|e| e.data().to_string().ok())
         .is_some_and(|cn| name_matches(&cn, domain))
 }
 

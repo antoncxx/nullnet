@@ -30,6 +30,7 @@ use tun_rs::{DeviceBuilder, Layer};
 mod cli;
 mod commands;
 mod control_channel;
+mod crypto;
 mod ebpf;
 mod egress_policy;
 mod egress_state;
@@ -43,6 +44,10 @@ mod triggers;
 
 pub const FORWARD_PORT: u16 = 9999;
 pub const TAP_NAME: &str = "nullnet0";
+/// Shared VXLAN dstport for a tunnel that doesn't need a dedicated one — must
+/// match nullnet-server's `DEFAULT_VXLAN_DSTPORT` (net_id_pool.rs) and the
+/// eBPF firewall's `VXLAN_PORT` constant (ebpf/src/main.rs).
+pub const DEFAULT_VXLAN_DSTPORT: u16 = 4789;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
@@ -105,6 +110,7 @@ async fn main() -> Result<(), Error> {
         }
     };
     let firewall_peers = ebpf_firewall.peers.clone();
+    let firewall_vxlan_ports = ebpf_firewall.vxlan_ports.clone();
 
     // shared dedup + waiter state, keyed by (initiator_container, port).
     // The NFQUEUE listener marks Pending and awaits the Notify; the control
@@ -135,6 +141,7 @@ async fn main() -> Result<(), Error> {
             triggers_state_cc,
             host_mappings_state,
             firewall_peers,
+            firewall_vxlan_ports,
             egress_state,
             bridge_cache_cc,
             policy_verdicts_cc,
@@ -453,11 +460,12 @@ async fn setup_tap(
         let reader = reader_shared.clone();
         let socket_1 = forward_socket.clone();
         let socket_2 = socket_1.clone();
+        let peers_1 = peers.clone();
         let peers_2 = peers.clone();
 
         // handle incoming traffic
         tokio::spawn(async move {
-            Box::pin(receive(&writer, &socket_1)).await;
+            Box::pin(receive(&writer, &socket_1, &peers_1)).await;
         });
 
         // handle outgoing traffic

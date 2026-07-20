@@ -39,6 +39,7 @@ The repository should be cloned under `/root` so the provided `setup-*.sh` scrip
   NET_TYPE=VXLAN
   CERT_ENCRYPTION_KEY=<32 raw bytes or 64 hex chars>
   PROXY_IP=192.168.1.100
+  ENCRYPTION_ENABLED=true
   ```
   `CERT_ENCRYPTION_KEY` is **required** — the server refuses to start without it. It encrypts
   TLS certificate private keys (and the DNS-provider credentials of ACME-issued certs) at rest;
@@ -49,6 +50,10 @@ The repository should be cloned under `/root` so the provided `setup-*.sh` scrip
   enable egress brokering**: when a registered service reaches out to the internet the server builds
   a per-initiator egress edge to this host. If unset, egress is disabled (the trigger is rejected
   with "PROXY_IP is not configured") — ingress still works.
+
+  `ENCRYPTION_ENABLED` toggles per-tunnel VLAN/VXLAN encryption (AES-256-GCM for VLAN, XFRM/MACsec
+  for VXLAN) and **defaults to `true`** — omit it to keep encryption on. Set it to `false`/`0`/`no`
+  to run tunnels unencrypted instead (a bare vxlan/veth link, no XFRM SA/policy or MACsec).
 
 - TLS certificates are issued from Let's Encrypt via a DNS-01 challenge (UI: *Certificates* page).
   Each cert stores its DNS-provider credentials encrypted at rest and is **renewed automatically**

@@ -4,7 +4,6 @@ import Dashboard from './pages/Dashboard';
 import Services from './pages/Services';
 import Nodes from './pages/Nodes';
 import Sessions from './pages/Sessions';
-import Pool from './pages/Pool';
 import Config from './pages/Config';
 import Events from './pages/Events';
 import Certificates from './pages/Certificates';
@@ -19,7 +18,6 @@ export default function App() {
           <Route path="/services" element={<Services />} />
           <Route path="/nodes" element={<Nodes />} />
           <Route path="/sessions" element={<Sessions />} />
-          <Route path="/pool" element={<Pool />} />
           <Route path="/config" element={<Config />} />
           <Route path="/certificates" element={<Certificates />} />
           <Route path="/events" element={<Events />} />

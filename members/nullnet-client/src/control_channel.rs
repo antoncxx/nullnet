@@ -1,7 +1,9 @@
 use crate::commands::{RtNetLinkHandle, configure_access_port, dnat, egress, remove_vlan};
 use crate::ebpf::{FirewallPeers, FirewallVxlanPorts, NetId};
+use crate::egress_policy::{PolicyVerdicts, flush_container_conntrack};
 use crate::egress_state::{EgressRecord, EgressState};
 use crate::host_mappings::HostMappingsState;
+use crate::nfqueue::BridgeIpCache;
 use crate::peers::peer::{Peers, VethKey};
 use crate::triggers::TriggersState;
 use ipnetwork::Ipv4Network;
@@ -42,6 +44,8 @@ pub(crate) async fn control_channel(
     firewall_peers: Arc<FirewallPeers>,
     firewall_vxlan_ports: Arc<FirewallVxlanPorts>,
     egress_state: Arc<EgressState>,
+    bridge_cache: BridgeIpCache,
+    policy_verdicts: Arc<PolicyVerdicts>,
 ) -> Result<(), Error> {
     let (outbound, grpc_rx) = mpsc::channel(64);
     let mut inbound = server
@@ -130,6 +134,18 @@ pub(crate) async fn control_channel(
             Some(net_message::Message::ContainerResume(container_resume)) => {
                 tokio::spawn(async move {
                     let _ = handle_container_resume(container_resume, outbound, server).await;
+                });
+            }
+            Some(net_message::Message::EgressPolicyChanged(_)) => {
+                // Re-verdict everything: drop cached verdicts, then flush
+                // conntrack for the containers' flows so live connections
+                // re-enter the NFQUEUE as NEW — newly-denied ones die there.
+                let verdicts = policy_verdicts.clone();
+                let cache = bridge_cache.clone();
+                tokio::spawn(async move {
+                    println!("[egress-policy] policy changed on server; re-verdicting flows");
+                    verdicts.clear();
+                    flush_container_conntrack(cache.ips()).await;
                 });
             }
             None => {}

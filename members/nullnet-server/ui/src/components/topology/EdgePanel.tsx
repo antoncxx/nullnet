@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import type { GraphEdgeJson, SessionJson } from '../../types';
+import type { GraphEdgeJson, SessionJson, EgressDestination } from '../../types';
 import { spRow, spKey, spCode } from './panelStyles';
 import { useTopologyData } from './TopologyContext';
 
@@ -7,8 +7,85 @@ interface Props {
   edges: GraphEdgeJson[];
 }
 
+function formatTime(unix: number): string {
+  return new Date(unix * 1000).toLocaleTimeString([], { hour12: false });
+}
+
+/// ISO alpha-2 country code → flag emoji (regional-indicator letters). Empty
+/// string for anything that isn't two ASCII letters (e.g. a country name).
+function flagEmoji(cc?: string): string {
+  if (!cc || !/^[A-Za-z]{2}$/.test(cc)) return '';
+  const base = 0x1f1e6;
+  const u = cc.toUpperCase();
+  return String.fromCodePoint(base + u.charCodeAt(0) - 65, base + u.charCodeAt(1) - 65);
+}
+
+const regionNames = new Intl.DisplayNames(['en'], { type: 'region' });
+
+/// Full country name for the flag tooltip; falls back to the raw code.
+function countryName(cc: string): string {
+  try {
+    return regionNames.of(cc.toUpperCase()) ?? cc.toUpperCase();
+  } catch {
+    return cc.toUpperCase();
+  }
+}
+
+/// Render the contacted-destination list for a single egress edge.
+function DestinationList({ destinations }: { destinations: EgressDestination[] }) {
+  if (destinations.length === 0) {
+    return (
+      <div style={{ fontSize: 10, color: 'var(--t2)', fontFamily: "'JetBrains Mono',monospace" }}>
+        → internet (no traffic yet)
+      </div>
+    );
+  }
+  return (
+    <table style={{ borderCollapse: 'collapse', width: '100%', fontFamily: "'JetBrains Mono',monospace" }}>
+      <tbody>
+        {destinations.map((d, i) => {
+          const flag = flagEmoji(d.country_code);
+          // thin rule between entries (not above the first)
+          const sep = i > 0 ? { borderTop: '1px solid rgba(255,255,255,.07)' } : {};
+          return (
+            <tr key={d.ip}>
+              <td style={{ ...sep, paddingRight: 8, paddingTop: 5, paddingBottom: 4, wordBreak: 'break-all', verticalAlign: 'top' }}>
+                <div style={{ fontSize: 10, color: d.blocked ? '#f87171' : '#a78bfa' }}>
+                  {flag && (
+                    <span title={countryName(d.country_code!)} style={{ marginRight: 5, cursor: 'default' }}>
+                      {flag}
+                    </span>
+                  )}
+                  {d.ip}
+                  {d.blocked && (
+                    <span style={{ marginLeft: 6, fontSize: 8.5, border: '1px solid rgba(248,113,113,.4)', borderRadius: 3, padding: '0 4px', letterSpacing: '.05em' }}>
+                      BLOCKED
+                    </span>
+                  )}
+                </div>
+                {d.org && (
+                  <div style={{ fontSize: 9, color: 'var(--t2)', marginTop: 1 }}>{d.org}</div>
+                )}
+              </td>
+              <td style={{ ...sep, fontSize: 9.5, color: 'var(--t1)', textAlign: 'right', whiteSpace: 'nowrap', verticalAlign: 'top', paddingTop: 5, paddingBottom: 4 }}>
+                ×{d.count} · {formatTime(d.last_seen)}
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
 export default function EdgePanel({ edges }: Props) {
   const { chains, sessions } = useTopologyData();
+
+  const egressDestCount = useMemo(() => {
+    const ips = new Set<string>();
+    for (const e of edges) for (const d of e.destinations ?? []) ips.add(d.ip);
+    return ips.size;
+  }, [edges]);
 
   const chainByProxyNetId = useMemo(() => {
     const m = new Map<number, number[]>();
@@ -44,8 +121,12 @@ export default function EdgePanel({ edges }: Props) {
       </div>
       {isEgress && (
         <div style={spRow}>
-          <div style={spKey}>Destination</div>
-          <div style={spCode}>internet</div>
+          <div style={spKey}>Destinations</div>
+          <div style={spCode}>
+            {egressDestCount > 0
+              ? `${egressDestCount} external IP${egressDestCount !== 1 ? 's' : ''}`
+              : 'internet (no traffic yet)'}
+          </div>
         </div>
       )}
       {first.via_proxy && (
@@ -80,9 +161,12 @@ export default function EdgePanel({ edges }: Props) {
               )}
             </div>
             {e.egress && (
-              <div style={{ fontSize: 10, color: '#a78bfa', fontFamily: "'JetBrains Mono',monospace" }}>
-                {e.from} → {e.to} → internet
-              </div>
+              <>
+                <div style={{ fontSize: 10, color: '#a78bfa', fontFamily: "'JetBrains Mono',monospace", paddingBottom: 7, borderBottom: '1px solid var(--gb)', marginBottom: 3 }}>
+                  {e.from} → {e.to} → {(e.destinations?.length ?? 0)} dest
+                </div>
+                <DestinationList destinations={e.destinations ?? []} />
+              </>
             )}
             {e.via_proxy && (
               <div style={{ fontSize: 10, color: '#fbbf24', fontFamily: "'JetBrains Mono',monospace", marginBottom: session ? 6 : 0 }}>

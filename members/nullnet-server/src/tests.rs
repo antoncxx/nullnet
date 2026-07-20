@@ -3,7 +3,7 @@
 use crate::graphviz::render_graphviz;
 use crate::nullnet_grpc_impl::NullnetGrpcImpl;
 use crate::services::input::{ServicesToml, StackMap, apply_config_update};
-use crate::services::service_info::ServiceInfo;
+use crate::services::service_info::{EgressPolicy, ServiceInfo};
 use crate::timeout::apply_timeouts;
 use nullnet_grpc_lib::nullnet_grpc::{NetMessage, ServiceProtocol, net_message};
 use std::collections::{HashMap, HashSet};
@@ -702,7 +702,8 @@ async fn node_disconnected_proxy1() {
 
 // ===========================================================================
 // proxy_timeout: A→C→D, B→D (D shared). proxy1→A+B, proxy2→A.
-// A has timeout=1, B has timeout=2.
+// A has timeout=1, B has timeout=5 (B kept well above A so the "B survives A's
+// timeout" assertions have a wide margin under real-wall-clock CI contention).
 // ===========================================================================
 
 const PROXY_TIMEOUT: &str = "proxy_timeout";
@@ -737,7 +738,7 @@ async fn proxy_timeout_setup() -> NullnetGrpcImpl {
 }
 
 /// After A's timeout (1s), both proxy clients on A expire. B's proxy client
-/// survives (timeout=2). A→C→D edges removed (no more proxy clients on A).
+/// survives (timeout=5). A→C→D edges removed (no more proxy clients on A).
 /// B→D edge survives.
 #[tokio::test]
 async fn proxy_timeout_A() {
@@ -767,7 +768,7 @@ async fn proxy_timeout_A() {
     }
 }
 
-/// After B's timeout (2s), B's proxy client also expires.
+/// After B's timeout (5s), B's proxy client also expires.
 /// All proxy chains gone; all services still registered.
 #[tokio::test]
 async fn proxy_timeout_A_then_B() {
@@ -780,14 +781,15 @@ async fn proxy_timeout_A_then_B() {
     assert_graphviz(&guard, PROXY_TIMEOUT, "after_timeout_A.dot");
     drop(guard);
 
-    // B expires after 2s total
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    // B expires after 5s total (real wall-clock; wide margin so a loaded CI
+    // runner overrunning the earlier sleeps still can't expire B prematurely)
+    tokio::time::sleep(std::time::Duration::from_millis(4200)).await;
     let mut guard = server.services().write().await;
     apply_timeouts(stack_view_mut(&mut guard), server.orchestrator(), "default").await;
     assert_graphviz(&guard, PROXY_TIMEOUT, "after_timeout_A_then_B.dot");
 
     // all services still registered, but no proxy clients left
-    for (_, si) in stack_view(&guard).iter() {
+    for si in stack_view(&guard).values() {
         if let ServiceInfo::Registered(reg) = si {
             assert!(
                 !reg.has_clients(),
@@ -801,19 +803,19 @@ async fn proxy_timeout_A_then_B() {
     assert_net_ids_in_use(&server, 0).await;
 }
 
-/// After 2s+ both A and B expire simultaneously in a single apply.
+/// After 5s+ both A and B expire simultaneously in a single apply.
 /// All 6 NET IDs freed.
 #[tokio::test]
 async fn proxy_timeout_all_at_once() {
     let server = proxy_timeout_setup().await;
 
-    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(5200)).await;
 
     let mut guard = server.services().write().await;
     apply_timeouts(stack_view_mut(&mut guard), server.orchestrator(), "default").await;
     assert_graphviz(&guard, PROXY_TIMEOUT, "after_timeout_all.dot");
 
-    for (_, si) in stack_view(&guard).iter() {
+    for si in stack_view(&guard).values() {
         if let ServiceInfo::Registered(reg) = si {
             assert!(
                 !reg.has_clients(),
@@ -826,7 +828,7 @@ async fn proxy_timeout_all_at_once() {
     assert_net_ids_in_use(&server, 0).await;
 }
 
-/// Config update tightens B's timeout from 2→1. After 1.5s, B's clients
+/// Config update tightens B's timeout from 5→1. After 1.5s, B's clients
 /// are past the new limit and get expired by the config change.
 /// A's timeout is unchanged in the config, so the config path doesn't
 /// touch A's clients (even though they're past A's own timeout).
@@ -1707,9 +1709,11 @@ async fn max_networks_reuse_lifecycle() {
     }
 
     // 2. Second proxy client on same proxy — should reuse (max_networks=1)
-    //    Delay so the two clients have different `latest` timestamps,
-    //    allowing the first to time out independently.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    //    Separate the two clients by 2s (>> the 1s timeout) so at step 3 C1 is
+    //    comfortably expired while C2 is comfortably alive. Timeouts use real
+    //    `Instant` (not tokio's pausable clock), so wide margins are needed to
+    //    survive wall-clock jitter on loaded CI runners.
+    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
     setup_proxy_chain(&server, "A", proxy1, "10.0.0.2").await;
     assert_net_ids_in_use(&server, 2).await; // no new net IDs allocated
 
@@ -1742,10 +1746,11 @@ async fn max_networks_reuse_lifecycle() {
         );
     }
 
-    // 3. First client times out — network should stay up
-    //    C1 created at t=0, C2 at t≈0.5s. Sleep 600ms more → t≈1.1s.
-    //    C1 aged 1.1s (> 1s timeout) → expired. C2 aged 0.6s → alive.
-    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    // 3. First client times out — network should stay up.
+    //    C1 created at t=0, C2 at t≈2s. Sleep 200ms → apply at t≈2.2s.
+    //    C1 aged ≈2.2s (> 1s → expired, ~1.2s margin); C2 aged ≈0.2s
+    //    (< 1s → alive, ~0.8s margin). Both margins absorb CI jitter.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     {
         let mut guard = server.services().write().await;
@@ -1772,9 +1777,10 @@ async fn max_networks_reuse_lifecycle() {
     // Net IDs still in use (shared network not torn down)
     assert_net_ids_in_use(&server, 2).await;
 
-    // 4. Second client times out — network should be torn down
-    //    C2 needs 0.4s more to reach 1s total. Sleep 500ms for margin.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // 4. Second client times out — network should be torn down.
+    //    C2 is aged ≈0.2s here; sleep 1.2s → ≈1.4s total (> 1s → expired).
+    //    This is an expiry check, so CI overrun only ages C2 further.
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
 
     {
         let mut guard = server.services().write().await;
@@ -2767,6 +2773,7 @@ fn suspend_test_server() -> NullnetGrpcImpl {
             None,
             ServiceProtocol::Http,
             None,
+            EgressPolicy::None,
         ),
     );
     inner.insert(
@@ -2778,6 +2785,7 @@ fn suspend_test_server() -> NullnetGrpcImpl {
             None,
             ServiceProtocol::Http,
             None,
+            EgressPolicy::None,
         ),
     );
     NullnetGrpcImpl::new_for_test(into_stack_map(inner))
@@ -2848,6 +2856,7 @@ async fn backend_involved_replicas_never_suspended() {
             None,
             ServiceProtocol::Http,
             None,
+            EgressPolicy::None,
         ),
     );
     // dep is named in the trigger chain (so it "is a backend dep")
@@ -2860,6 +2869,7 @@ async fn backend_involved_replicas_never_suspended() {
             None,
             ServiceProtocol::Http,
             None,
+            EgressPolicy::None,
         ),
     );
     // a plain entry-point service with no backend involvement (control)
@@ -2872,6 +2882,7 @@ async fn backend_involved_replicas_never_suspended() {
             None,
             ServiceProtocol::Http,
             None,
+            EgressPolicy::None,
         ),
     );
     let server = NullnetGrpcImpl::new_for_test(into_stack_map(inner));

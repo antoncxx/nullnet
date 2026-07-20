@@ -1,0 +1,77 @@
+//! Client-side egress country-policy state.
+//!
+//! Verdicts are decided by the server (`CheckEgressDestination`) and cached
+//! here per `(container, dst_ip)`. The cache is consulted by the egress
+//! NFQUEUE handler for the first packet of every NEW external flow; on a
+//! server-pushed `EgressPolicyChanged` it is cleared and conntrack is flushed
+//! so live flows re-enter the queue as NEW and get re-verdicted — flows the
+//! new policy denies die on their next packet.
+
+use std::collections::HashMap;
+use std::net::Ipv4Addr;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// How long a cached verdict stays valid. Bounds staleness if the server's
+/// policy-change push is missed (e.g. control channel down at reload time).
+const VERDICT_TTL: Duration = Duration::from_secs(60);
+/// Cap on cached verdicts; the least-recently-checked entry is evicted.
+const MAX_VERDICTS: usize = 4096;
+
+/// TTL'd `(container, dst_ip)` → allowed cache. Sync mutex; holds are brief
+/// and never span an `.await`.
+#[derive(Default)]
+pub struct PolicyVerdicts {
+    map: Mutex<HashMap<(String, Ipv4Addr), (bool, Instant)>>,
+}
+
+impl PolicyVerdicts {
+    /// Cached verdict, or `None` if absent or older than `VERDICT_TTL`.
+    pub fn get(&self, container: &str, dst_ip: Ipv4Addr) -> Option<bool> {
+        let map = self.map.lock().unwrap();
+        let (allowed, at) = map.get(&(container.to_string(), dst_ip))?;
+        (at.elapsed() < VERDICT_TTL).then_some(*allowed)
+    }
+
+    pub fn put(&self, container: &str, dst_ip: Ipv4Addr, allowed: bool) {
+        let key = (container.to_string(), dst_ip);
+        let mut map = self.map.lock().unwrap();
+        if map.len() >= MAX_VERDICTS
+            && !map.contains_key(&key)
+            && let Some(oldest) = map
+                .iter()
+                .min_by_key(|(_, (_, at))| *at)
+                .map(|(k, _)| k.clone())
+        {
+            map.remove(&oldest);
+        }
+        map.insert(key, (allowed, Instant::now()));
+    }
+
+    pub fn clear(&self) {
+        self.map.lock().unwrap().clear();
+    }
+}
+
+/// Delete the conntrack entries originating from each container bridge IP so
+/// every live flow re-enters the NFQUEUE as NEW and is re-verdicted. Exit
+/// code 1 just means "no entries matched" — only real failures are logged.
+pub async fn flush_container_conntrack(ips: Vec<Ipv4Addr>) {
+    for ip in ips {
+        let out = tokio::process::Command::new("conntrack")
+            .args(["-D", "-s", &ip.to_string()])
+            .output()
+            .await;
+        match out {
+            Ok(o) if o.status.code() == Some(0) || o.status.code() == Some(1) => {}
+            Ok(o) => eprintln!(
+                "[egress-policy] conntrack -D -s {ip} exited {}: {}",
+                o.status,
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => {
+                eprintln!("[egress-policy] conntrack flush {ip}: {e} (is conntrack installed?)");
+            }
+        }
+    }
+}

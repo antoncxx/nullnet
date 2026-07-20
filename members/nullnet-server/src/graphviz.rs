@@ -202,6 +202,26 @@ struct GraphEdgeJson {
     /// Omitted from JSON when false to keep the inbound edge shape unchanged.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     egress: bool,
+    /// External destinations contacted through this egress edge (empty/omitted
+    /// for inbound edges and egress edges that haven't carried traffic yet).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    destinations: Vec<EgressDestJson>,
+}
+
+#[derive(Serialize)]
+struct EgressDestJson {
+    ip: String,
+    last_seen: u64,
+    count: u64,
+    /// Latest attempt denied by the egress country policy. Omitted when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    blocked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    country_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    asn: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    org: Option<String>,
 }
 
 /// Resolve the registered service name owning the replica `(ip, docker)`.
@@ -282,6 +302,7 @@ pub(crate) fn render_graph_json(
                     net_id: ci.net_id(),
                     setup_ms: ci.time_ms(),
                     egress: false,
+                    destinations: Vec::new(),
                 })
             })
         })
@@ -302,6 +323,19 @@ pub(crate) fn render_graph_json(
                 net_id: e.net_id,
                 setup_ms: 0,
                 egress: true,
+                destinations: e
+                    .destinations
+                    .iter()
+                    .map(|d| EgressDestJson {
+                        ip: d.ip.to_string(),
+                        last_seen: d.last_seen,
+                        count: d.count,
+                        blocked: d.blocked,
+                        country_code: d.geo.as_ref().and_then(|g| g.country_code.clone()),
+                        asn: d.geo.as_ref().and_then(|g| g.asn.clone()),
+                        org: d.geo.as_ref().and_then(|g| g.org.clone()),
+                    })
+                    .collect(),
             })
         })
         .collect();

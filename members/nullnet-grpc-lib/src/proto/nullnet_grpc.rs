@@ -6,7 +6,7 @@ pub struct NetType {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct NetMessage {
-    #[prost(oneof = "net_message::Message", tags = "1, 2, 3, 4, 5, 6")]
+    #[prost(oneof = "net_message::Message", tags = "1, 2, 3, 4, 5, 6, 7")]
     pub message: ::core::option::Option<net_message::Message>,
 }
 /// Nested message and enum types in `NetMessage`.
@@ -28,8 +28,17 @@ pub mod net_message {
         ContainerSuspend(super::ContainerSuspend),
         #[prost(message, tag = "6")]
         ContainerResume(super::ContainerResume),
+        /// Egress country-policy changed on the server (fire-and-forget)
+        #[prost(message, tag = "7")]
+        EgressPolicyChanged(super::EgressPolicyChanged),
     }
 }
+/// A service's egress country lists changed on a config reload. The client
+/// drops its cached policy verdicts and flushes conntrack for its registered
+/// containers' external flows, so every live flow re-enters the NFQUEUE as NEW
+/// and is re-verdicted — flows the new policy denies die on their next packet.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EgressPolicyChanged {}
 /// Pause an idle Docker container: the client runs `docker pause`. No ack —
 /// the server treats the replica as suspended optimistically.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -270,6 +279,49 @@ pub struct EgressTriggerRequest {
     pub dst_ip: ::prost::alloc::string::String,
     #[prost(uint32, tag = "4")]
     pub dst_port: u32,
+}
+/// Egress destination report — a periodic batch flush from the client. Each entry
+/// is one external destination with a client-side running connection count and the
+/// latest contact time. The server keys each entry to the service's egress edge by
+/// (sender_ip, initiator_container) and stores the client-provided values verbatim
+/// (the client is the sole reporter for its own edge).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct EgressDestinationReport {
+    #[prost(message, repeated, tag = "1")]
+    pub entries: ::prost::alloc::vec::Vec<EgressDestinationEntry>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EgressDestinationEntry {
+    /// Real Docker container name of the initiator replica. Empty for a host
+    /// process; disambiguates co-located replicas otherwise (as in EgressTrigger).
+    #[prost(string, tag = "1")]
+    pub initiator_container: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub dst_ip: ::prost::alloc::string::String,
+    /// Running count of NEW connections the client observed to this destination.
+    #[prost(uint64, tag = "3")]
+    pub count: u64,
+    /// Epoch seconds of the most recent connection to this destination.
+    #[prost(uint64, tag = "4")]
+    pub last_seen: u64,
+    /// Whether the latest attempt was denied by the egress country policy.
+    #[prost(bool, tag = "5")]
+    pub blocked: bool,
+}
+/// Egress country-policy check for one held first-packet: which registered
+/// replica wants to reach which external destination.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EgressPolicyCheck {
+    /// Real Docker container name of the initiator replica (as in EgressTrigger).
+    #[prost(string, tag = "1")]
+    pub initiator_container: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub dst_ip: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EgressPolicyVerdict {
+    #[prost(bool, tag = "1")]
+    pub allowed: bool,
 }
 /// A single TLS certificate, keyed by the SNI name it serves (exact, e.g.
 /// "color.com", or wildcard, e.g. "\*.color.com").
@@ -890,6 +942,66 @@ pub mod nullnet_grpc_client {
                 .insert(GrpcMethod::new("nullnet_grpc.NullnetGrpc", "EgressTrigger"));
             self.inner.unary(req, path, codec).await
         }
+        /// Report the external destinations a registered service contacted through its
+        /// egress edge. Distinct from EgressTrigger (which builds the edge once): the
+        /// client accumulates per-destination counts locally and flushes a batch
+        /// periodically, so the server holds a live per-service list with counts.
+        pub async fn report_egress_destination(
+            &mut self,
+            request: impl tonic::IntoRequest<super::EgressDestinationReport>,
+        ) -> std::result::Result<tonic::Response<super::Empty>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nullnet_grpc.NullnetGrpc/ReportEgressDestination",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "nullnet_grpc.NullnetGrpc",
+                        "ReportEgressDestination",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Per-flow egress country-policy check: the client holds the first packet of a
+        /// NEW external flow and asks whether the service may contact this destination.
+        /// The server resolves the destination's country (geo cache) and evaluates the
+        /// service's allowed\_/blocked_countries lists. The client caches verdicts.
+        pub async fn check_egress_destination(
+            &mut self,
+            request: impl tonic::IntoRequest<super::EgressPolicyCheck>,
+        ) -> std::result::Result<
+            tonic::Response<super::EgressPolicyVerdict>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nullnet_grpc.NullnetGrpc/CheckEgressDestination",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("nullnet_grpc.NullnetGrpc", "CheckEgressDestination"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         /// Report an event from a client or proxy agent back to the server.
         pub async fn report_event(
             &mut self,
@@ -1029,6 +1141,25 @@ pub mod nullnet_grpc_server {
             &self,
             request: tonic::Request<super::EgressTriggerRequest>,
         ) -> std::result::Result<tonic::Response<super::Empty>, tonic::Status>;
+        /// Report the external destinations a registered service contacted through its
+        /// egress edge. Distinct from EgressTrigger (which builds the edge once): the
+        /// client accumulates per-destination counts locally and flushes a batch
+        /// periodically, so the server holds a live per-service list with counts.
+        async fn report_egress_destination(
+            &self,
+            request: tonic::Request<super::EgressDestinationReport>,
+        ) -> std::result::Result<tonic::Response<super::Empty>, tonic::Status>;
+        /// Per-flow egress country-policy check: the client holds the first packet of a
+        /// NEW external flow and asks whether the service may contact this destination.
+        /// The server resolves the destination's country (geo cache) and evaluates the
+        /// service's allowed\_/blocked_countries lists. The client caches verdicts.
+        async fn check_egress_destination(
+            &self,
+            request: tonic::Request<super::EgressPolicyCheck>,
+        ) -> std::result::Result<
+            tonic::Response<super::EgressPolicyVerdict>,
+            tonic::Status,
+        >;
         /// Report an event from a client or proxy agent back to the server.
         async fn report_event(
             &self,
@@ -1391,6 +1522,104 @@ pub mod nullnet_grpc_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = EgressTriggerSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nullnet_grpc.NullnetGrpc/ReportEgressDestination" => {
+                    #[allow(non_camel_case_types)]
+                    struct ReportEgressDestinationSvc<T: NullnetGrpc>(pub Arc<T>);
+                    impl<
+                        T: NullnetGrpc,
+                    > tonic::server::UnaryService<super::EgressDestinationReport>
+                    for ReportEgressDestinationSvc<T> {
+                        type Response = super::Empty;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::EgressDestinationReport>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as NullnetGrpc>::report_egress_destination(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ReportEgressDestinationSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nullnet_grpc.NullnetGrpc/CheckEgressDestination" => {
+                    #[allow(non_camel_case_types)]
+                    struct CheckEgressDestinationSvc<T: NullnetGrpc>(pub Arc<T>);
+                    impl<
+                        T: NullnetGrpc,
+                    > tonic::server::UnaryService<super::EgressPolicyCheck>
+                    for CheckEgressDestinationSvc<T> {
+                        type Response = super::EgressPolicyVerdict;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::EgressPolicyCheck>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as NullnetGrpc>::check_egress_destination(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CheckEgressDestinationSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

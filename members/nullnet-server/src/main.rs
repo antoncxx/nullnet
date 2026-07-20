@@ -4,6 +4,7 @@ mod certs;
 mod crypto;
 mod env;
 mod events;
+mod geo;
 mod graphviz;
 mod http_server;
 mod net;

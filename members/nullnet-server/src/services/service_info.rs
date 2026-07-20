@@ -28,6 +28,29 @@ pub(crate) fn backend_involved_services(
     pinned
 }
 
+/// Per-service egress country policy from the stack TOML (ISO alpha-2 codes,
+/// stored uppercase). `Blocked` denies the listed countries (unknown → allow);
+/// `Allowed` permits only the listed ones (unknown → deny).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum EgressPolicy {
+    #[default]
+    None,
+    Blocked(Vec<String>),
+    Allowed(Vec<String>),
+}
+
+impl EgressPolicy {
+    /// Whether a destination in `country` (uppercase alpha-2; `None` = unknown)
+    /// may be contacted under this policy.
+    pub(crate) fn allows(&self, country: Option<&str>) -> bool {
+        match self {
+            EgressPolicy::None => true,
+            EgressPolicy::Blocked(list) => country.is_none_or(|c| !list.iter().any(|b| b == c)),
+            EgressPolicy::Allowed(list) => country.is_some_and(|c| list.iter().any(|a| a == c)),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum ServiceInfo {
     Unregistered(UnregisteredServiceInfo),
@@ -43,6 +66,7 @@ impl ServiceInfo {
         max_networks: Option<u32>,
         protocol: ServiceProtocol,
         listen_port: Option<u16>,
+        egress_policy: EgressPolicy,
     ) -> Self {
         ServiceInfo::Unregistered(UnregisteredServiceInfo::new(
             proxy_deps,
@@ -51,6 +75,7 @@ impl ServiceInfo {
             max_networks,
             protocol,
             listen_port,
+            egress_policy,
         ))
     }
 
@@ -64,6 +89,7 @@ impl ServiceInfo {
                     max_networks: unreg.max_networks,
                     protocol: unreg.protocol,
                     listen_port: unreg.listen_port,
+                    egress_policy: unreg.egress_policy.clone(),
                     replicas: vec![Replica::new(ip, port, docker_container)],
                 });
             }
@@ -104,6 +130,7 @@ impl ServiceInfo {
                     reg.max_networks,
                     reg.protocol,
                     reg.listen_port,
+                    reg.egress_policy.clone(),
                 ));
             }
         }
@@ -123,6 +150,7 @@ impl ServiceInfo {
                     reg.max_networks,
                     reg.protocol,
                     reg.listen_port,
+                    reg.egress_policy.clone(),
                 ));
             }
         }
@@ -140,6 +168,7 @@ impl ServiceInfo {
         let loaded_max_networks = loaded.max_networks();
         let loaded_protocol = loaded.protocol();
         let loaded_listen_port = loaded.listen_port();
+        let loaded_egress_policy = loaded.egress_policy().clone();
         match self {
             ServiceInfo::Unregistered(unreg) => {
                 unreg.proxy_deps = loaded.proxy_deps().to_vec();
@@ -148,6 +177,7 @@ impl ServiceInfo {
                 unreg.max_networks = loaded_max_networks;
                 unreg.protocol = loaded_protocol;
                 unreg.listen_port = loaded_listen_port;
+                unreg.egress_policy = loaded_egress_policy;
             }
             ServiceInfo::Registered(reg) => {
                 reg.proxy_deps = loaded.proxy_deps().to_vec();
@@ -156,7 +186,16 @@ impl ServiceInfo {
                 reg.max_networks = loaded_max_networks;
                 reg.protocol = loaded_protocol;
                 reg.listen_port = loaded_listen_port;
+                reg.egress_policy = loaded_egress_policy;
             }
+        }
+    }
+
+    /// Egress country policy declared for this service (default: none).
+    pub(crate) fn egress_policy(&self) -> &EgressPolicy {
+        match self {
+            ServiceInfo::Unregistered(unreg) => &unreg.egress_policy,
+            ServiceInfo::Registered(reg) => &reg.egress_policy,
         }
     }
 
@@ -223,6 +262,8 @@ pub(crate) struct UnregisteredServiceInfo {
     protocol: ServiceProtocol,
     /// External port the proxy binds to for `Tcp`/`Udp` services.
     listen_port: Option<u16>,
+    /// Egress country policy for this service's external traffic.
+    egress_policy: EgressPolicy,
 }
 
 impl UnregisteredServiceInfo {
@@ -234,6 +275,7 @@ impl UnregisteredServiceInfo {
         max_networks: Option<u32>,
         protocol: ServiceProtocol,
         listen_port: Option<u16>,
+        egress_policy: EgressPolicy,
     ) -> Self {
         Self {
             proxy_deps,
@@ -242,6 +284,7 @@ impl UnregisteredServiceInfo {
             max_networks,
             protocol,
             listen_port,
+            egress_policy,
         }
     }
 }
@@ -329,6 +372,8 @@ pub(crate) struct RegisteredServiceInfo {
     protocol: ServiceProtocol,
     /// External port the proxy binds to for `Tcp`/`Udp` services.
     listen_port: Option<u16>,
+    /// Egress country policy for this service's external traffic.
+    egress_policy: EgressPolicy,
     /// Replicas of this service.
     replicas: Vec<Replica>,
 }

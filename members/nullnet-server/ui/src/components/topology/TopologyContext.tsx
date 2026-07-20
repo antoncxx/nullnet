@@ -112,7 +112,10 @@ export function TopologyProvider({
   stack: string;
   children: React.ReactNode;
 }) {
-  const { data: graph, refetch } = useApi<GraphJson>(`/api/graph/${stack}`);
+  // Poll the graph (5s) as well as re-fetching on SSE session events below: egress
+  // destinations change the graph but emit no event (they're deliberately off the
+  // event pipeline), so the SSE nudge alone would leave them stale until refresh.
+  const { data: graph, refetch } = useApi<GraphJson>(`/api/graph/${stack}`, 5000);
   const { data: services } = useApi<ServiceJson[]>(`/api/services/${stack}`, 5000);
   const { data: sessions, refetch: refetchSessions } = useApi<SessionJson[]>(`/api/sessions/${stack}`, 5000);
   const { data: chains, refetch: refetchChains } = useApi<ChainJson[]>(`/api/chains/${stack}`);

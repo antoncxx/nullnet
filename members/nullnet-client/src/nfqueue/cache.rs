@@ -37,6 +37,12 @@ impl BridgeIpCache {
         self.inner.read().unwrap().get(&ip).cloned()
     }
 
+    /// All container bridge IPs currently known — the conntrack-flush scope
+    /// when an egress policy changes.
+    pub fn ips(&self) -> Vec<Ipv4Addr> {
+        self.inner.read().unwrap().keys().copied().collect()
+    }
+
     fn replace(&self, map: HashMap<Ipv4Addr, String>) {
         *self.inner.write().unwrap() = map;
     }

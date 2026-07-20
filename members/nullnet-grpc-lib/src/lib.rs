@@ -2,8 +2,9 @@ mod proto;
 
 use crate::nullnet_grpc::nullnet_grpc_client::NullnetGrpcClient;
 use crate::nullnet_grpc::{
-    AgentEvent, BackendTriggerRequest, CertBundle, EgressTriggerRequest, Empty, MsgId, NetMessage,
-    NetType, PortMappingBundle, ProxyRequest, Services, ServicesListResponse, Upstream,
+    AgentEvent, BackendTriggerRequest, CertBundle, EgressDestinationEntry, EgressDestinationReport,
+    EgressPolicyCheck, EgressTriggerRequest, Empty, MsgId, NetMessage, NetType, PortMappingBundle,
+    ProxyRequest, Services, ServicesListResponse, Upstream,
 };
 pub use proto::*;
 use tokio::sync::mpsc;
@@ -139,6 +140,38 @@ impl NullnetGrpcInterface {
             }))
             .await
             .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    #[allow(clippy::missing_errors_doc)]
+    pub async fn report_egress_destinations(
+        &self,
+        entries: Vec<EgressDestinationEntry>,
+    ) -> Result<(), String> {
+        self.client
+            .clone()
+            .report_egress_destination(Request::new(EgressDestinationReport { entries }))
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// Ask whether the egress country policy allows `initiator_container` to
+    /// reach `dst_ip`. Called with the flow's first packet held in the NFQUEUE.
+    #[allow(clippy::missing_errors_doc)]
+    pub async fn check_egress_destination(
+        &self,
+        initiator_container: String,
+        dst_ip: String,
+    ) -> Result<bool, String> {
+        self.client
+            .clone()
+            .check_egress_destination(Request::new(EgressPolicyCheck {
+                initiator_container,
+                dst_ip,
+            }))
+            .await
+            .map(|resp| resp.into_inner().allowed)
             .map_err(|e| e.to_string())
     }
 

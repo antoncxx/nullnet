@@ -1,12 +1,12 @@
 use crate::events::Event as ServerEvent;
 use crate::orchestrator::Orchestrator;
 use crate::services::changes::{apply_changes, detect_config_changes};
-use crate::services::service_info::ServiceInfo;
+use crate::services::service_info::{EgressPolicy, ServiceInfo};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use nullnet_grpc_lib::nullnet_grpc::ServiceProtocol;
 use nullnet_liberror::{Error, ErrorHandler, Location, location};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Sub;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -191,6 +191,7 @@ impl ServicesToml {
                     None,
                     ServiceProtocol::Http,
                     None,
+                    EgressPolicy::None,
                 ),
             );
         }
@@ -220,6 +221,18 @@ impl ServicesToml {
                 }
                 _ => {}
             }
+            let egress_policy = match (s.blocked_countries, s.allowed_countries) {
+                (Some(_), Some(_)) => {
+                    return Err(format!(
+                        "service '{}': 'blocked_countries' and 'allowed_countries' are mutually exclusive",
+                        s.name
+                    ))
+                    .handle_err(location!());
+                }
+                (Some(list), None) => EgressPolicy::Blocked(upper(list)),
+                (None, Some(list)) => EgressPolicy::Allowed(upper(list)),
+                (None, None) => EgressPolicy::None,
+            };
             let triggers = s.triggers.into_iter().map(|t| (t.port, t.chain)).collect();
             ret_val.insert(
                 s.name,
@@ -230,6 +243,7 @@ impl ServicesToml {
                     s.max_networks,
                     protocol,
                     s.listen_port,
+                    egress_policy,
                 ),
             );
         }
@@ -280,6 +294,11 @@ pub(crate) fn detect_port_conflicts(stacks: &StackMap) -> Vec<PortConflict> {
     conflicts
 }
 
+/// Normalize country codes for case-insensitive matching.
+fn upper(list: Vec<String>) -> Vec<String> {
+    list.into_iter().map(|c| c.to_uppercase()).collect()
+}
+
 async fn parse_file(path: &Path) -> Result<HashMap<String, ServiceInfo>, Error> {
     let str_repr = tokio::fs::read_to_string(path)
         .await
@@ -288,11 +307,26 @@ async fn parse_file(path: &Path) -> Result<HashMap<String, ServiceInfo>, Error> 
     parsed.services_map()
 }
 
+/// All non-default egress policies, keyed by (stack, service) — the comparable
+/// footprint used to detect a policy change across a reload.
+fn egress_policies(services: &StackMap) -> BTreeMap<(String, String), EgressPolicy> {
+    services
+        .iter()
+        .flat_map(|(stack, map)| {
+            map.iter()
+                .filter(|(_, si)| *si.egress_policy() != EgressPolicy::None)
+                .map(|(name, si)| ((stack.clone(), name.clone()), si.egress_policy().clone()))
+        })
+        .collect()
+}
+
 pub(crate) async fn apply_config_update(
     services: &mut StackMap,
     loaded_services: StackMap,
     orchestrator: &Orchestrator,
 ) {
+    let policies_before = egress_policies(services);
+    let policies_after = egress_policies(&loaded_services);
     // Stacks that disappeared from config: tear down everything in them.
     let removed_stacks: Vec<String> = services
         .keys()
@@ -335,6 +369,12 @@ pub(crate) async fn apply_config_update(
             .emit(ServerEvent::config_reloaded(stack))
             .await;
     }
+
+    // Any egress country-policy difference → tell clients to re-verdict live
+    // flows (they flush verdict caches + conntrack; denied flows die).
+    if policies_before != policies_after {
+        orchestrator.broadcast_egress_policy_changed().await;
+    }
 }
 
 #[derive(Deserialize)]
@@ -366,6 +406,11 @@ struct ServiceToml {
     /// External port the proxy listens on for this service. Required (and
     /// only meaningful) when `protocol` is `tcp` or `udp`.
     listen_port: Option<u16>,
+    /// Egress country policy (ISO alpha-2 codes), mutually exclusive:
+    /// `blocked_countries` denies the listed countries (unknown → allow);
+    /// `allowed_countries` permits only the listed ones (unknown → deny).
+    blocked_countries: Option<Vec<String>>,
+    allowed_countries: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -599,6 +644,7 @@ listen_port = 6379
                 None,
                 ServiceProtocol::Tcp,
                 Some(6379),
+                EgressPolicy::None,
             ),
         );
         let mut bravo = HashMap::new();
@@ -611,6 +657,7 @@ listen_port = 6379
                 None,
                 ServiceProtocol::Tcp,
                 Some(6379),
+                EgressPolicy::None,
             ),
         );
         let stacks: StackMap =
@@ -634,6 +681,7 @@ listen_port = 6379
                 None,
                 ServiceProtocol::Tcp,
                 Some(53),
+                EgressPolicy::None,
             ),
         );
         alpha.insert(
@@ -645,6 +693,7 @@ listen_port = 6379
                 None,
                 ServiceProtocol::Udp,
                 Some(53),
+                EgressPolicy::None,
             ),
         );
         let stacks: StackMap = HashMap::from([("alpha".to_string(), alpha)]);

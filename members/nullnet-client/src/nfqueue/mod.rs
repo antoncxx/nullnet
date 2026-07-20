@@ -4,9 +4,11 @@ mod listener;
 mod parse;
 mod recv_loop;
 
+pub use cache::BridgeIpCache;
+
 use crate::commands::nfqueue as rules;
+use crate::egress_policy::PolicyVerdicts;
 use crate::triggers::TriggersState;
-use cache::BridgeIpCache;
 use egress_listener::spawn_egress_recv_thread;
 use listener::{HANDLER_CONCURRENCY, ListenerCtx, spawn_recv_thread};
 use nullnet_grpc_lib::NullnetGrpcInterface;
@@ -34,8 +36,9 @@ pub fn spawn_listener(
     triggers_state: Arc<TriggersState>,
     config_rx: UnboundedReceiver<HashMap<u16, String>>,
     docker_changed: Arc<Notify>,
+    cache: BridgeIpCache,
+    verdicts: Arc<PolicyVerdicts>,
 ) {
-    let cache = BridgeIpCache::new();
     let port_to_service: Arc<RwLock<HashMap<u16, String>>> = Arc::new(RwLock::new(HashMap::new()));
 
     // Initial cache populate + long-running docker-events watcher. The
@@ -64,7 +67,12 @@ pub fn spawn_listener(
 
     // Egress-trigger listener shares the bridge-IP cache, gRPC handle, and the
     // trigger-lifecycle state (so it can hold a SYN until steering is installed).
-    spawn_egress_recv_thread(grpc.clone(), cache.clone(), triggers_state.clone());
+    spawn_egress_recv_thread(
+        grpc.clone(),
+        cache.clone(),
+        triggers_state.clone(),
+        verdicts,
+    );
 
     let ctx = ListenerCtx {
         grpc,

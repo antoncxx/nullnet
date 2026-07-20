@@ -1,11 +1,12 @@
 use crate::env::{ENCRYPTION_ENABLED, NET_TYPE};
 use crate::events::{Event, EventStore};
+use crate::geo::{GeoCache, GeoInfo};
 use crate::net::{EgressRole, NetExt};
 use crate::net_id_pool::{NetIdPool, UdpPortPool, generate_key};
 use crate::services::changes::{apply_changes, detect_node_disconnect_changes};
 use crate::services::input::StackMap;
 use nullnet_grpc_lib::nullnet_grpc::{
-    ContainerResume, ContainerSuspend, MsgId, Net, NetMessage, net_message,
+    ContainerResume, ContainerSuspend, EgressPolicyChanged, MsgId, Net, NetMessage, net_message,
 };
 use nullnet_liberror::{Error, ErrorHandler, Location, location};
 use std::collections::HashMap;
@@ -22,6 +23,21 @@ type OutboundStream = mpsc::Sender<Result<NetMessage, Status>>;
 /// One edge per initiator replica multiplexes all of its external destinations.
 type EgressKey = (IpAddr, Option<String>);
 
+/// Cap on distinct external destinations tracked per egress edge. When full, the
+/// least-recently-contacted destination is evicted. Bounds memory for a service
+/// that contacts a very large set of hosts (e.g. a crawler).
+const MAX_DESTS_PER_EDGE: usize = 256;
+
+/// Per-destination stats on an egress edge, reported by the client (which owns
+/// the running count and latest-seen time; the server stores them verbatim).
+#[derive(Debug, Clone)]
+struct DestStat {
+    last_seen: u64,
+    count: u64,
+    /// Whether the latest attempt was denied by the egress country policy.
+    blocked: bool,
+}
+
 /// A live egress forward-proxy edge (initiator replica -> proxy host).
 #[derive(Debug, Clone)]
 struct EgressEdge {
@@ -29,6 +45,21 @@ struct EgressEdge {
     initiator_ip: IpAddr,
     initiator_docker: Option<String>,
     proxy_ip: IpAddr,
+    /// External destinations this edge has carried, keyed by destination IP.
+    /// Populated from client destination reports; lives and dies with the edge.
+    destinations: HashMap<Ipv4Addr, DestStat>,
+}
+
+/// One contacted external destination, for topology rendering.
+#[derive(Debug, Clone)]
+pub(crate) struct EgressDestination {
+    pub(crate) ip: Ipv4Addr,
+    pub(crate) last_seen: u64,
+    pub(crate) count: u64,
+    /// Whether the latest attempt was denied by the egress country policy.
+    pub(crate) blocked: bool,
+    /// Geo/ASN enrichment, if the lookup has resolved yet (else `None`).
+    pub(crate) geo: Option<GeoInfo>,
 }
 
 /// Read-only snapshot of a live egress edge, for topology rendering.
@@ -38,6 +69,8 @@ pub(crate) struct EgressEdgeInfo {
     pub(crate) initiator_ip: IpAddr,
     pub(crate) initiator_docker: Option<String>,
     pub(crate) proxy_ip: IpAddr,
+    /// Contacted destinations, most-recently-seen first.
+    pub(crate) destinations: Vec<EgressDestination>,
 }
 
 /// An order-independent pair of underlay host IPs, used to scope per-tunnel
@@ -67,6 +100,8 @@ pub struct Orchestrator {
     /// Live egress edges, keyed by initiator replica. Separate from the service
     /// StackMap because the proxy end is infrastructure, not a registered service.
     egress_edges: Arc<RwLock<HashMap<EgressKey, EgressEdge>>>,
+    /// IP → country/ASN cache enriching contacted egress destinations.
+    geo: GeoCache,
     pub(crate) events: EventStore,
 }
 
@@ -79,6 +114,7 @@ impl Orchestrator {
             udp_port_pools: Arc::new(Mutex::new(HashMap::new())),
             net_id_ports: Arc::new(Mutex::new(HashMap::new())),
             egress_edges: Arc::new(RwLock::new(HashMap::new())),
+            geo: GeoCache::from_env(),
             events: EventStore::new(),
         }
     }
@@ -177,6 +213,7 @@ impl Orchestrator {
                     initiator_ip,
                     initiator_docker: initiator_docker.clone(),
                     proxy_ip,
+                    destinations: HashMap::new(),
                 },
             );
         }
@@ -279,13 +316,88 @@ impl Orchestrator {
             .await
             .values()
             .filter(|e| e.net_id != 0)
-            .map(|e| EgressEdgeInfo {
-                net_id: e.net_id,
-                initiator_ip: e.initiator_ip,
-                initiator_docker: e.initiator_docker.clone(),
-                proxy_ip: e.proxy_ip,
+            .map(|e| {
+                let mut destinations: Vec<EgressDestination> = e
+                    .destinations
+                    .iter()
+                    .map(|(ip, s)| EgressDestination {
+                        ip: *ip,
+                        last_seen: s.last_seen,
+                        count: s.count,
+                        blocked: s.blocked,
+                        geo: self.geo.get(*ip),
+                    })
+                    .collect();
+                destinations.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(a.ip.cmp(&b.ip)));
+                EgressEdgeInfo {
+                    net_id: e.net_id,
+                    initiator_ip: e.initiator_ip,
+                    initiator_docker: e.initiator_docker.clone(),
+                    proxy_ip: e.proxy_ip,
+                    destinations,
+                }
             })
             .collect()
+    }
+
+    /// Record a client-reported external destination on the edge keyed by
+    /// `(initiator_ip, initiator_docker)` — the SAME key `ensure_egress_edge` uses,
+    /// so the report lands on the correct edge. `count`/`last_seen` are the
+    /// client's authoritative values and stored verbatim. No-op if no edge exists
+    /// (the client re-sends on its next flush once the edge is up). Bounded by
+    /// `MAX_DESTS_PER_EDGE` with least-recently-seen eviction.
+    pub(crate) async fn record_egress_destination(
+        &self,
+        initiator_ip: IpAddr,
+        initiator_docker: Option<String>,
+        dst_ip: Ipv4Addr,
+        count: u64,
+        last_seen: u64,
+        blocked: bool,
+    ) {
+        let key = (initiator_ip, initiator_docker);
+        let mut edges = self.egress_edges.write().await;
+        let Some(edge) = edges.get_mut(&key) else {
+            return;
+        };
+        // Kick off (cached, once-per-IP) geo/ASN enrichment for the UI.
+        self.geo.ensure(dst_ip);
+        match edge.destinations.get_mut(&dst_ip) {
+            Some(stat) => {
+                stat.last_seen = last_seen;
+                stat.count = count;
+                stat.blocked = blocked;
+            }
+            None => {
+                if edge.destinations.len() >= MAX_DESTS_PER_EDGE
+                    && let Some(oldest) = edge
+                        .destinations
+                        .iter()
+                        .min_by_key(|(_, s)| s.last_seen)
+                        .map(|(ip, _)| *ip)
+                {
+                    edge.destinations.remove(&oldest);
+                }
+                edge.destinations.insert(
+                    dst_ip,
+                    DestStat {
+                        last_seen,
+                        count,
+                        blocked,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Country (uppercase alpha-2) of `ip` for the egress policy check,
+    /// awaiting the (cached, once-per-IP) geo lookup. `None` = unknown.
+    pub(crate) async fn destination_country(&self, ip: Ipv4Addr) -> Option<String> {
+        self.geo
+            .lookup_now(ip)
+            .await?
+            .country_code
+            .map(|c| c.to_uppercase())
     }
 
     /// Tear down every egress edge anchored on `node_ip` (as initiator or proxy).
@@ -416,6 +528,29 @@ impl Orchestrator {
                 message: Some(net_message::Message::ContainerSuspend(ContainerSuspend {
                     docker_container,
                 })),
+            };
+            let _ = outbound.send(Ok(message)).await.handle_err(location!());
+        }
+    }
+
+    /// Fire-and-forget broadcast: an egress country policy changed on a config
+    /// reload. Every client drops its cached policy verdicts and flushes
+    /// conntrack, so live flows re-verdict (newly-denied ones die). Coarse by
+    /// design — reloads are rare and re-verdicting is cheap.
+    pub(crate) async fn broadcast_egress_policy_changed(&self) {
+        let outbounds: Vec<(IpAddr, OutboundStream)> = self
+            .clients
+            .read()
+            .await
+            .iter()
+            .map(|(ip, o)| (*ip, o.clone()))
+            .collect();
+        for (ip, outbound) in outbounds {
+            println!("Notifying {ip} of egress policy change");
+            let message = NetMessage {
+                message: Some(net_message::Message::EgressPolicyChanged(
+                    EgressPolicyChanged {},
+                )),
             };
             let _ = outbound.send(Ok(message)).await.handle_err(location!());
         }

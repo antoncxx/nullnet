@@ -12,6 +12,7 @@ prost.workspace = true
 tonic-prost.workspace = true
 nullnet-liberror.workspace = true
 nullnet-grpc-lib.workspace = true
+nullnet-libipinfo = "0.2.1"
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "sync"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"

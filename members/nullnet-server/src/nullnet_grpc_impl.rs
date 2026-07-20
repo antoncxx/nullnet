@@ -10,13 +10,14 @@ use crate::services::changes::{
 use crate::services::clients::{Client, ClientInfo};
 use crate::services::edge::{Edge, RegisteredEdge};
 use crate::services::input::{ServicesToml, StackMap};
-use crate::services::service_info::{ServiceInfo, backend_involved_services};
+use crate::services::service_info::{EgressPolicy, ServiceInfo, backend_involved_services};
 use crate::timeout::check_timeouts;
 use nullnet_grpc_lib::nullnet_grpc::nullnet_grpc_server::NullnetGrpc;
 use nullnet_grpc_lib::nullnet_grpc::{
-    AgentEvent, BackendTriggerRequest, CertBundle, EgressTriggerRequest, Empty, MsgId, Net,
-    NetMessage, NetType, PortMapping, PortMappingBundle, ProxyRequest, ServiceTrigger, Services,
-    ServicesListResponse, Upstream, agent_event::Event as AgentEventKind,
+    AgentEvent, BackendTriggerRequest, CertBundle, EgressDestinationReport, EgressPolicyCheck,
+    EgressPolicyVerdict, EgressTriggerRequest, Empty, MsgId, Net, NetMessage, NetType, PortMapping,
+    PortMappingBundle, ProxyRequest, ServiceTrigger, Services, ServicesListResponse, Upstream,
+    agent_event::Event as AgentEventKind,
 };
 use nullnet_liberror::{Error, ErrorHandler, Location, location};
 use std::collections::{HashMap, HashSet};
@@ -752,35 +753,10 @@ impl NullnetGrpcImpl {
                 .handle_err(location!())?
         };
 
-        // Resolve the initiator to a *registered* replica by (ip, container),
-        // scanning every stack — the client doesn't send a logical service name.
-        // A match also enforces that only registered services get egress.
-        let resolved = {
-            let guard = self.services.read().await;
-            let mut found: Option<(String, IpAddr, Option<String>)> = None;
-            'outer: for stack_map in guard.values() {
-                for (name, si) in stack_map.iter() {
-                    let ServiceInfo::Registered(reg) = si else {
-                        continue;
-                    };
-                    let replica = reg.replicas().iter().find(|r| {
-                        r.ip() == sender_ip
-                            && match initiator_container {
-                                Some(c) => r.docker_container() == Some(c),
-                                None => true,
-                            }
-                    });
-                    if let Some(r) = replica {
-                        found =
-                            Some((name.clone(), r.ip(), r.docker_container().map(String::from)));
-                        break 'outer;
-                    }
-                }
-            }
-            found
-        };
-
-        let Some((initiator_name, initiator_ip, initiator_docker)) = resolved else {
+        let Some((initiator_name, initiator_ip, initiator_docker)) = self
+            .resolve_registered_replica(sender_ip, initiator_container)
+            .await
+        else {
             Err("No registered replica matches the egress sender").handle_err(location!())?
         };
 
@@ -794,6 +770,152 @@ impl NullnetGrpcImpl {
             );
         }
         Ok(())
+    }
+
+    /// Resolve an egress sender `(sender_ip, container)` to the *registered*
+    /// replica identity `(service_name, ip, docker)` — scanning every stack,
+    /// since the client sends no logical service name. The returned `(ip, docker)`
+    /// is the canonical `EgressKey` used by `ensure_egress_edge`, so callers keying
+    /// the egress edge (trigger + destination report) stay in agreement.
+    async fn resolve_registered_replica(
+        &self,
+        sender_ip: IpAddr,
+        initiator_container: Option<&str>,
+    ) -> Option<(String, IpAddr, Option<String>)> {
+        let guard = self.services.read().await;
+        for stack_map in guard.values() {
+            for (name, si) in stack_map.iter() {
+                let ServiceInfo::Registered(reg) = si else {
+                    continue;
+                };
+                let replica = reg.replicas().iter().find(|r| {
+                    r.ip() == sender_ip
+                        && match initiator_container {
+                            Some(c) => r.docker_container() == Some(c),
+                            None => true,
+                        }
+                });
+                if let Some(r) = replica {
+                    return Some((name.clone(), r.ip(), r.docker_container().map(String::from)));
+                }
+            }
+        }
+        None
+    }
+
+    async fn report_egress_destination_impl(
+        &self,
+        request: Request<EgressDestinationReport>,
+    ) -> Result<Response<Empty>, Error> {
+        let sender_ip = request
+            .remote_addr()
+            .ok_or("Could not get remote address for egress destination report")
+            .handle_err(location!())?
+            .ip();
+
+        let entries = request.into_inner().entries;
+        // Resolve each distinct container once per batch to the canonical
+        // (ip, docker) key `ensure_egress_edge` uses, so each destination lands on
+        // its own initiator's edge (not a co-located replica's). Unregistered
+        // senders resolve to None → their entries are dropped.
+        let mut resolved: HashMap<Option<String>, Option<(IpAddr, Option<String>)>> =
+            HashMap::new();
+        for entry in entries {
+            let Ok(dst_ip) = entry.dst_ip.parse::<Ipv4Addr>() else {
+                continue; // malformed destination — skip
+            };
+            let container = if entry.initiator_container.is_empty() {
+                None
+            } else {
+                Some(entry.initiator_container)
+            };
+            let edge_id = if let Some(cached) = resolved.get(&container) {
+                cached.clone()
+            } else {
+                let r = self
+                    .resolve_registered_replica(sender_ip, container.as_deref())
+                    .await
+                    .map(|(_, ip, docker)| (ip, docker));
+                resolved.insert(container.clone(), r.clone());
+                r
+            };
+            if let Some((initiator_ip, initiator_docker)) = edge_id {
+                self.orchestrator
+                    .record_egress_destination(
+                        initiator_ip,
+                        initiator_docker,
+                        dst_ip,
+                        entry.count,
+                        entry.last_seen,
+                        entry.blocked,
+                    )
+                    .await;
+            }
+        }
+        Ok(Response::new(Empty {}))
+    }
+
+    /// Evaluate the egress country policy for one held first-packet: resolve
+    /// the sender to its registered service, resolve the destination's country
+    /// (awaited, cached once-per-IP), apply the service's lists. Services with
+    /// no policy allow everything without a lookup.
+    async fn check_egress_destination_impl(
+        &self,
+        request: Request<EgressPolicyCheck>,
+    ) -> Result<Response<EgressPolicyVerdict>, Error> {
+        let sender_ip = request
+            .remote_addr()
+            .ok_or("Could not get remote address for egress policy check")
+            .handle_err(location!())?
+            .ip();
+        let req = request.into_inner();
+        let dst_ip: Ipv4Addr = req.dst_ip.parse().handle_err(location!())?;
+        let container = if req.initiator_container.is_empty() {
+            None
+        } else {
+            Some(req.initiator_container.as_str())
+        };
+
+        // One pass over the stacks: find the registered replica and its
+        // service's policy together (mirrors resolve_registered_replica).
+        let resolved: Option<(String, EgressPolicy)> = {
+            let guard = self.services.read().await;
+            guard.values().find_map(|stack_map| {
+                stack_map.iter().find_map(|(name, si)| {
+                    let ServiceInfo::Registered(reg) = si else {
+                        return None;
+                    };
+                    reg.replicas()
+                        .iter()
+                        .any(|r| {
+                            r.ip() == sender_ip
+                                && match container {
+                                    Some(c) => r.docker_container() == Some(c),
+                                    None => true,
+                                }
+                        })
+                        .then(|| (name.clone(), si.egress_policy().clone()))
+                })
+            })
+        };
+        let Some((service_name, policy)) = resolved else {
+            Err("No registered replica matches the egress policy check").handle_err(location!())?
+        };
+
+        let allowed = if policy == EgressPolicy::None {
+            true
+        } else {
+            let country = self.orchestrator.destination_country(dst_ip).await;
+            let allowed = policy.allows(country.as_deref());
+            if !allowed {
+                println!(
+                    "[egress-policy] deny '{service_name}' -> {dst_ip} ({})",
+                    country.as_deref().unwrap_or("unknown country")
+                );
+            }
+            allowed
+        };
+        Ok(Response::new(EgressPolicyVerdict { allowed }))
     }
 
     pub(crate) fn services(&self) -> &Arc<RwLock<StackMap>> {
@@ -1312,6 +1434,24 @@ impl NullnetGrpc for NullnetGrpcImpl {
         req: Request<EgressTriggerRequest>,
     ) -> Result<Response<Empty>, Status> {
         self.egress_trigger_impl(req)
+            .await
+            .map_err(|err| Status::internal(err.to_str()))
+    }
+
+    async fn report_egress_destination(
+        &self,
+        req: Request<EgressDestinationReport>,
+    ) -> Result<Response<Empty>, Status> {
+        self.report_egress_destination_impl(req)
+            .await
+            .map_err(|err| Status::internal(err.to_str()))
+    }
+
+    async fn check_egress_destination(
+        &self,
+        req: Request<EgressPolicyCheck>,
+    ) -> Result<Response<EgressPolicyVerdict>, Status> {
+        self.check_egress_destination_impl(req)
             .await
             .map_err(|err| Status::internal(err.to_str()))
     }

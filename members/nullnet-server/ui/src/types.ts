@@ -117,6 +117,19 @@ export interface GraphNodeJson {
   paused_replica_count: number;
 }
 
+export interface EgressDestination {
+  ip: string;
+  last_seen: number;
+  count: number;
+  /** Latest attempt denied by the egress country policy. */
+  blocked?: boolean;
+  /** ISO alpha-2 country code (for the flag), if resolved. */
+  country_code?: string;
+  asn?: string;
+  /** ASN organization name. */
+  org?: string;
+}
+
 export interface GraphEdgeJson {
   from: string;
   via_proxy?: string;
@@ -125,6 +138,8 @@ export interface GraphEdgeJson {
   setup_ms: number;
   /** Outbound egress edge: initiator service → gateway proxy. */
   egress?: boolean;
+  /** External destinations contacted through this egress edge. */
+  destinations?: EgressDestination[];
 }
 
 export interface GraphJson {

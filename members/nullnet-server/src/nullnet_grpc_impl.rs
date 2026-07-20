@@ -1,7 +1,8 @@
-use crate::env::{NET_TYPE, PROXY_IP};
+use crate::env::{ENCRYPTION_ENABLED, NET_TYPE, PROXY_IP};
 use crate::events::Event;
 use crate::graphviz::generate_graphviz;
 use crate::net::EgressRole;
+use crate::net_id_pool::generate_key;
 use crate::orchestrator::Orchestrator;
 use crate::services::changes::{
     apply_changes, collect_dep_chain_edges, detect_services_list_changes,
@@ -993,6 +994,43 @@ impl NullnetGrpcImpl {
                         .await;
                 }
 
+                // One AES-256 key per tunnel, handed identically to both
+                // endpoints below (skipped when encryption is globally
+                // disabled). A dedicated per-tunnel UDP dstport is only
+                // needed so the two hosts' XFRM policies can tell this
+                // tunnel apart from other concurrent *encrypted* tunnels
+                // between the same host pair — same-host tunnels (MACsec on
+                // a veth, no XFRM) and unencrypted ones (no XFRM either) fall
+                // back to the shared default port instead. The 40k-entry pool
+                // is also scoped per host pair (see `Orchestrator::allocate_vxlan_port`),
+                // not global, so it only actually caps concurrent encrypted
+                // tunnels between the same two hosts.
+                let encrypted = *ENCRYPTION_ENABLED;
+                let encryption_key = if encrypted { generate_key() } else { [0u8; 32] };
+                let needs_dedicated_port =
+                    *NET_TYPE == Net::Vxlan && encrypted && server_ethernet != client_ethernet;
+                let dstport = if needs_dedicated_port {
+                    match orchestrator
+                        .allocate_vxlan_port(net_id, server_ethernet, client_ethernet)
+                        .await
+                    {
+                        Some(port) => Some(u32::from(port)),
+                        None => {
+                            eprintln!("UDP port pool exhausted");
+                            orchestrator.free_net_id(net_id).await;
+                            if let Some(stack_map) = services.write().await.get_mut(&stack)
+                                && let Some(ServiceInfo::Registered(reg)) =
+                                    stack_map.get_mut(server.name())
+                            {
+                                reg.remove_client(&client);
+                            }
+                            return EdgeOutcome::Failed;
+                        }
+                    }
+                } else {
+                    None
+                };
+
                 let orch = orchestrator.clone();
                 let cd = client_docker.clone();
                 let sd = server_docker.clone();
@@ -1003,6 +1041,9 @@ impl NullnetGrpcImpl {
                     client_ethernet,
                     (cd, sd),
                     None,
+                    encryption_key,
+                    dstport,
+                    encrypted,
                     server_egress,
                 );
                 let orch2 = orchestrator.clone();
@@ -1015,6 +1056,9 @@ impl NullnetGrpcImpl {
                     server_ethernet,
                     (cd, sd),
                     backend_entry_port,
+                    encryption_key,
+                    dstport,
+                    encrypted,
                     client_egress,
                 );
 

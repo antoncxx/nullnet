@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import Layout from '../components/Layout';
 import { useApi } from '../hooks/useApi';
 import { useStack } from '../StackContext';
-import type { NodeJson, PoolJson } from '../types';
+import type { NodeJson } from '../types';
 import { TopologyProvider, useTopologyData, useTopologyUI } from '../components/topology/TopologyContext';
 import TopologyGraph from '../components/topology/TopologyGraph';
 import TopologyPanel from '../components/topology/TopologyPanel';
@@ -13,7 +13,6 @@ function DashboardView() {
   const { panel, dispatch } = useTopologyUI();
 
   const { data: nodes } = useApi<NodeJson[]>(`/api/nodes/${stack}`, 5000);
-  const { data: pool } = useApi<PoolJson>('/api/pool', 5000);
 
   const chainByProxyNetId = useMemo(() => {
     const m = new Map<number, number[]>();
@@ -35,7 +34,6 @@ function DashboardView() {
   const proxyCount = graph
     ? new Set(graph.edges.filter(e => e.via_proxy).map(e => e.via_proxy!)).size
     : 0;
-  const poolPct = pool ? ((pool.in_use / pool.total) * 100).toFixed(1) : null;
 
   // sorted: registered first, then alpha
   const sortedNodes = useMemo(() => {
@@ -72,13 +70,6 @@ function DashboardView() {
                 {registeredCount}<span className="denom">/{nodeCountG}</span>
               </div>
               <div className="stat-sub">{nodeCountG - registeredCount} unregistered</div>
-            </div>
-            <div className="stat glass">
-              <div className="stat-label">Pool</div>
-              <div className="stat-value" style={{ color: poolPct && parseFloat(poolPct) > 80 ? 'var(--amber)' : 'var(--t0)' }}>
-                {poolPct !== null ? `${poolPct}%` : '—'}
-              </div>
-              <div className="stat-sub">{pool ? `${pool.in_use} / ${pool.total} in use` : 'loading…'}</div>
             </div>
             <div className="stat glass">
               <div className="stat-label">Nodes</div>

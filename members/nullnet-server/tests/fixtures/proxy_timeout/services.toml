@@ -5,5 +5,5 @@ proxy_dependencies = [["C", "D"]]
 
 [[services]]
 name = "B"
-timeout = 2
+timeout = 5
 proxy_dependencies = [["D"]]

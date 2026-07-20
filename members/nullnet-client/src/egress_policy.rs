@@ -36,14 +36,14 @@ impl PolicyVerdicts {
     pub fn put(&self, container: &str, dst_ip: Ipv4Addr, allowed: bool) {
         let key = (container.to_string(), dst_ip);
         let mut map = self.map.lock().unwrap();
-        if map.len() >= MAX_VERDICTS && !map.contains_key(&key) {
-            if let Some(oldest) = map
+        if map.len() >= MAX_VERDICTS
+            && !map.contains_key(&key)
+            && let Some(oldest) = map
                 .iter()
                 .min_by_key(|(_, (_, at))| *at)
                 .map(|(k, _)| k.clone())
-            {
-                map.remove(&oldest);
-            }
+        {
+            map.remove(&oldest);
         }
         map.insert(key, (allowed, Instant::now()));
     }

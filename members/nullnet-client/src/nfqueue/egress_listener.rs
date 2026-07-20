@@ -290,14 +290,13 @@ fn record_destination(ctx: &EgressCtx, container: &str, dst_ip: Ipv4Addr, blocke
         acc.blocked = blocked;
         return;
     }
-    if pending.len() >= MAX_PENDING_DSTS {
-        if let Some(oldest) = pending
+    if pending.len() >= MAX_PENDING_DSTS
+        && let Some(oldest) = pending
             .iter()
             .min_by_key(|(_, a)| a.last_seen)
             .map(|(k, _)| k.clone())
-        {
-            pending.remove(&oldest);
-        }
+    {
+        pending.remove(&oldest);
     }
     pending.insert(
         (container.to_string(), dst_ip),

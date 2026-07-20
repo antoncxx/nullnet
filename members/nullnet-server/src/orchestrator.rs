@@ -316,15 +316,14 @@ impl Orchestrator {
                 stat.blocked = blocked;
             }
             None => {
-                if edge.destinations.len() >= MAX_DESTS_PER_EDGE {
-                    if let Some(oldest) = edge
+                if edge.destinations.len() >= MAX_DESTS_PER_EDGE
+                    && let Some(oldest) = edge
                         .destinations
                         .iter()
                         .min_by_key(|(_, s)| s.last_seen)
                         .map(|(ip, _)| *ip)
-                    {
-                        edge.destinations.remove(&oldest);
-                    }
+                {
+                    edge.destinations.remove(&oldest);
                 }
                 edge.destinations.insert(
                     dst_ip,

@@ -787,7 +787,7 @@ async fn proxy_timeout_A_then_B() {
     assert_graphviz(&guard, PROXY_TIMEOUT, "after_timeout_A_then_B.dot");
 
     // all services still registered, but no proxy clients left
-    for (_, si) in stack_view(&guard).iter() {
+    for si in stack_view(&guard).values() {
         if let ServiceInfo::Registered(reg) = si {
             assert!(
                 !reg.has_clients(),
@@ -813,7 +813,7 @@ async fn proxy_timeout_all_at_once() {
     apply_timeouts(stack_view_mut(&mut guard), server.orchestrator(), "default").await;
     assert_graphviz(&guard, PROXY_TIMEOUT, "after_timeout_all.dot");
 
-    for (_, si) in stack_view(&guard).iter() {
+    for si in stack_view(&guard).values() {
         if let ServiceInfo::Registered(reg) = si {
             assert!(
                 !reg.has_clients(),

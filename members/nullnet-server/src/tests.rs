@@ -1707,9 +1707,11 @@ async fn max_networks_reuse_lifecycle() {
     }
 
     // 2. Second proxy client on same proxy — should reuse (max_networks=1)
-    //    Delay so the two clients have different `latest` timestamps,
-    //    allowing the first to time out independently.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    //    Separate the two clients by 2s (>> the 1s timeout) so at step 3 C1 is
+    //    comfortably expired while C2 is comfortably alive. Timeouts use real
+    //    `Instant` (not tokio's pausable clock), so wide margins are needed to
+    //    survive wall-clock jitter on loaded CI runners.
+    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
     setup_proxy_chain(&server, "A", proxy1, "10.0.0.2").await;
     assert_net_ids_in_use(&server, 2).await; // no new net IDs allocated
 
@@ -1742,10 +1744,11 @@ async fn max_networks_reuse_lifecycle() {
         );
     }
 
-    // 3. First client times out — network should stay up
-    //    C1 created at t=0, C2 at t≈0.5s. Sleep 600ms more → t≈1.1s.
-    //    C1 aged 1.1s (> 1s timeout) → expired. C2 aged 0.6s → alive.
-    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    // 3. First client times out — network should stay up.
+    //    C1 created at t=0, C2 at t≈2s. Sleep 200ms → apply at t≈2.2s.
+    //    C1 aged ≈2.2s (> 1s → expired, ~1.2s margin); C2 aged ≈0.2s
+    //    (< 1s → alive, ~0.8s margin). Both margins absorb CI jitter.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     {
         let mut guard = server.services().write().await;
@@ -1772,9 +1775,10 @@ async fn max_networks_reuse_lifecycle() {
     // Net IDs still in use (shared network not torn down)
     assert_net_ids_in_use(&server, 2).await;
 
-    // 4. Second client times out — network should be torn down
-    //    C2 needs 0.4s more to reach 1s total. Sleep 500ms for margin.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // 4. Second client times out — network should be torn down.
+    //    C2 is aged ≈0.2s here; sleep 1.2s → ≈1.4s total (> 1s → expired).
+    //    This is an expiry check, so CI overrun only ages C2 further.
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
 
     {
         let mut guard = server.services().write().await;

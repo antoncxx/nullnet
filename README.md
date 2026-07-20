@@ -107,6 +107,21 @@ The repository should be cloned under `/root` so the provided `setup-*.sh` scrip
   listen_port = 53
   ```
 
+- `blocked_countries` / `allowed_countries` restrict where a service may reach on the internet, by
+  ISO alpha-2 country code (the destination IP is geo-resolved server-side). `blocked_countries`
+  denies the listed countries and allows everything else (including IPs with unknown geo);
+  `allowed_countries` permits only the listed countries and denies everything else (unknown geo
+  included). The two are mutually exclusive — setting both is a hard config error. Enforcement is at
+  the initiator's nullnet-client: the first packet of each new external flow is held and verdicted,
+  denied destinations show a `BLOCKED` chip in the topology UI, and editing the policy at runtime
+  tears down already-established flows that the new policy forbids:
+  ```
+  [[services]]
+  name = "api.internal"
+  timeout = 0
+  blocked_countries = ["RU", "CN"]
+  ```
+
 - run the project as a daemon (from the repo root)
   ```
   ./setup-server.sh

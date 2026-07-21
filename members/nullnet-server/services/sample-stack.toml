@@ -1,6 +1,8 @@
 [[services]]
 name = "color.com"
 timeout = 0
+docker_container = "sample-stack_color"
+port = 3001
 proxy_dependencies = [["fs.color.com"]]
 max_networks = 2
 
@@ -11,3 +13,5 @@ chain = ["ts.color.com"]
 [[services]]
 name = "fs.color.com"
 timeout = 30
+docker_container = "sample-stack_fs"
+port = 8080

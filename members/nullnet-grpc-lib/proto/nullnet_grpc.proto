@@ -8,9 +8,11 @@ service NullnetGrpc {
   // Network type declaration
   rpc NetworkType(Empty) returns (NetType);
 
-  // Services list — response carries the trigger ports the caller should
-  // observe locally for the services it just declared as hosting.
-  rpc ServicesList(Services) returns (ServicesListResponse);
+  // Host report — the client sends its raw local observations (running
+  // containers + listening processes); the server joins them against the
+  // per-stack service config. The response carries the trigger ports the
+  // caller should observe locally for the services it was matched to.
+  rpc ServicesList(ServiceReport) returns (ServicesListResponse);
 
   // Control channel
   rpc ControlChannel(stream MsgId) returns (stream NetMessage);
@@ -186,15 +188,20 @@ message MsgId {
   string id = 1;
 }
 
-message Services {
-  repeated Service services = 1;
+// Raw local observations a client reports; the server joins them against the
+// match keys in services/<stack>.toml. One observation may match many services.
+message ServiceReport {
+  repeated Container containers = 1;
+  repeated Listener listeners = 2;
 }
 
-message Service {
-  string name = 1;
-  uint32 port = 2;
-  optional string docker_container = 3;
-  string stack = 4;
+message Container {
+  string match_key = 1;  // matched against a service's docker_container (Swarm label / container name)
+  string real_name = 2;  // actual container name; stored as the replica identity
+}
+
+message Listener {
+  string path = 1;  // /proc/<pid>/exe of the listening process; matched against process_path
 }
 
 // Response to ServicesList: per-declared-service, the set of trigger ports

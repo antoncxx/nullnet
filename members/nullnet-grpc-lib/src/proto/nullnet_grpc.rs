@@ -170,23 +170,29 @@ pub struct MsgId {
     #[prost(string, tag = "1")]
     pub id: ::prost::alloc::string::String,
 }
-#[derive(serde::Deserialize)]
+/// Raw local observations a client reports; the server joins them against the
+/// match keys in services/<stack>.toml. One observation may match many services.
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Services {
+pub struct ServiceReport {
     #[prost(message, repeated, tag = "1")]
-    pub services: ::prost::alloc::vec::Vec<Service>,
+    pub containers: ::prost::alloc::vec::Vec<Container>,
+    #[prost(message, repeated, tag = "2")]
+    pub listeners: ::prost::alloc::vec::Vec<Listener>,
 }
-#[derive(serde::Deserialize)]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct Service {
+pub struct Container {
+    /// matched against a service's docker_container (Swarm label / container name)
     #[prost(string, tag = "1")]
-    pub name: ::prost::alloc::string::String,
-    #[prost(uint32, tag = "2")]
-    pub port: u32,
-    #[prost(string, optional, tag = "3")]
-    pub docker_container: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, tag = "4")]
-    pub stack: ::prost::alloc::string::String,
+    pub match_key: ::prost::alloc::string::String,
+    /// actual container name; stored as the replica identity
+    #[prost(string, tag = "2")]
+    pub real_name: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Listener {
+    /// /proc/<pid>/exe of the listening process; matched against process_path
+    #[prost(string, tag = "1")]
+    pub path: ::prost::alloc::string::String,
 }
 /// Response to ServicesList: per-declared-service, the set of trigger ports
 /// the client should observe via eBPF. When traffic is observed on one of
@@ -824,11 +830,13 @@ pub mod nullnet_grpc_client {
                 .insert(GrpcMethod::new("nullnet_grpc.NullnetGrpc", "NetworkType"));
             self.inner.unary(req, path, codec).await
         }
-        /// Services list — response carries the trigger ports the caller should
-        /// observe locally for the services it just declared as hosting.
+        /// Host report — the client sends its raw local observations (running
+        /// containers + listening processes); the server joins them against the
+        /// per-stack service config. The response carries the trigger ports the
+        /// caller should observe locally for the services it was matched to.
         pub async fn services_list(
             &mut self,
-            request: impl tonic::IntoRequest<super::Services>,
+            request: impl tonic::IntoRequest<super::ServiceReport>,
         ) -> std::result::Result<
             tonic::Response<super::ServicesListResponse>,
             tonic::Status,
@@ -1102,11 +1110,13 @@ pub mod nullnet_grpc_server {
             &self,
             request: tonic::Request<super::Empty>,
         ) -> std::result::Result<tonic::Response<super::NetType>, tonic::Status>;
-        /// Services list — response carries the trigger ports the caller should
-        /// observe locally for the services it just declared as hosting.
+        /// Host report — the client sends its raw local observations (running
+        /// containers + listening processes); the server joins them against the
+        /// per-stack service config. The response carries the trigger ports the
+        /// caller should observe locally for the services it was matched to.
         async fn services_list(
             &self,
-            request: tonic::Request<super::Services>,
+            request: tonic::Request<super::ServiceReport>,
         ) -> std::result::Result<
             tonic::Response<super::ServicesListResponse>,
             tonic::Status,
@@ -1320,7 +1330,9 @@ pub mod nullnet_grpc_server {
                 "/nullnet_grpc.NullnetGrpc/ServicesList" => {
                     #[allow(non_camel_case_types)]
                     struct ServicesListSvc<T: NullnetGrpc>(pub Arc<T>);
-                    impl<T: NullnetGrpc> tonic::server::UnaryService<super::Services>
+                    impl<
+                        T: NullnetGrpc,
+                    > tonic::server::UnaryService<super::ServiceReport>
                     for ServicesListSvc<T> {
                         type Response = super::ServicesListResponse;
                         type Future = BoxFuture<
@@ -1329,7 +1341,7 @@ pub mod nullnet_grpc_server {
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::Services>,
+                            request: tonic::Request<super::ServiceReport>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {

@@ -14,7 +14,6 @@ serde = { version = "1.0.228", default-features = false, features = ["derive", "
 nullnet-liberror.workspace = true
 nullnet-grpc-lib.workspace = true
 ipnetwork = { workspace = true, features = ["serde"] }
-toml.workspace = true
 listeners = "0.5.1"
 rtnetlink = "0.20.0"
 futures = "0.3.32"

@@ -68,20 +68,57 @@ The repository should be cloned under `/root` so the provided `setup-*.sh` scrip
   `members/nullnet-server/services/`. The filename (minus `.toml`) is the stack name.
   For example, to define a stack called `my-app`, create `services/my-app.toml`:
   ```
-  [[services]]
+  [[services]]                 # http entry point, backed by a Docker container
   name = "color.com"
   timeout = 0
+  docker_container = "my-app_color"
+  port = 3001
   proxy_dependencies = [["fs.color.com"]]
 
   [[services.triggers]]
   port = 5555
   chain = ["ts.color.com"]
 
-  [[services]]
+  [[services]]                 # backend-only dep of color.com
   name = "fs.color.com"
-  ...
+  docker_container = "my-app_fs"
+  port = 8080
+
+  [[services]]                 # backend trigger target — port matches the trigger (5555)
+  name = "ts.color.com"
+  docker_container = "my-app_ts"
+  port = 5555
+
+  [[services]]                 # host (non-Docker) service, matched by process
+  name = "metrics.com"
+  timeout = 0
+  process_path = "/usr/local/bin/metrics-exporter"
+  port = 9090
+
+  [[services]]                 # raw tcp — proxy binds listen_port and forwards
+  name = "redis.internal"
+  timeout = 0
+  docker_container = "my-app_redis"
+  port = 6379
+  protocol = "tcp"
+  listen_port = 6379
+
+  [[services]]                 # egress country policy
+  name = "api.internal"
+  timeout = 0
+  docker_container = "my-app_api"
+  port = 8000
+  blocked_countries = ["RU", "CN"]
   ```
 
+- a service is **hostable** when it declares a match key plus a `port` (the backend port replicas
+  are reached on). Clients hold no service file: each reports its raw local observations and the
+  server matches them against these keys. A container/process may match several services across
+  stacks; every match registers a replica:
+  - `docker_container` — the Swarm service label (`com.docker.swarm.service.name`) or, standalone,
+    the container name; matched against a running container
+  - `process_path` — a listening process's exe path (`/proc/<pid>/exe`); matched against a host
+    (non-Docker) service
 - `timeout` controls proxy-reachability: when present the service is a proxy-reachable entry point
   with that per-client idle timeout in seconds (`0` disables the timeout); omit it to keep the
   service off the proxy (backend-only)
@@ -97,21 +134,7 @@ The repository should be cloned under `/root` so the provided `setup-*.sh` scrip
   `Host` header on the shared 80/443 listeners) or `tcp`/`udp`, which each require `listen_port` —
   the external port nullnet-proxy binds directly and forwards raw traffic from. `listen_port` must
   be globally unique per protocol across every stack (the server refuses to start, or rejects a
-  hot-reload, if two services claim the same `protocol`/`listen_port` pair):
-  ```
-  [[services]]
-  name = "redis.internal"
-  timeout = 0
-  protocol = "tcp"
-  listen_port = 6379
-
-  [[services]]
-  name = "dns.internal"
-  timeout = 0
-  protocol = "udp"
-  listen_port = 53
-  ```
-
+  hot-reload, if two services claim the same `protocol`/`listen_port` pair)
 - `blocked_countries` / `allowed_countries` restrict where a service may reach on the internet, by
   ISO alpha-2 country code (the destination IP is geo-resolved server-side). `blocked_countries`
   denies the listed countries and allows everything else (including IPs with unknown geo);
@@ -119,13 +142,7 @@ The repository should be cloned under `/root` so the provided `setup-*.sh` scrip
   included). The two are mutually exclusive — setting both is a hard config error. Enforcement is at
   the initiator's nullnet-client: the first packet of each new external flow is held and verdicted,
   denied destinations show a `BLOCKED` chip in the topology UI, and editing the policy at runtime
-  tears down already-established flows that the new policy forbids:
-  ```
-  [[services]]
-  name = "api.internal"
-  timeout = 0
-  blocked_countries = ["RU", "CN"]
-  ```
+  tears down already-established flows that the new policy forbids
 
 - run the project as a daemon (from the repo root)
   ```
@@ -187,22 +204,6 @@ The repository should be cloned under `/root` so the provided `setup-*.sh` scrip
   forwards brokered egress to the internet; inbound still obeys the allowlist, so list `80,443`
   (and `22`) in `INGRESS_ALLOW_TCP_PORTS` there. Every other (strict) node obeys the allowlist in
   both directions.
-
-- service configuration must be stored at `members/nullnet-client/services.toml`. Each entry
-  must declare its `stack` (which must match a `services/<stack>.toml` on the server, otherwise
-  the declaration is dropped):
-  ```
-  # services = [] # use this if you don't want to declare any service
-
-  [[services]]
-  name = "color.com"
-  port = 3001
-  docker_container = "stack-name_container-name" # should correspond to the label "com.docker.swarm.service.name"
-  stack = "my-app"
-
-  [[services]]
-  ...
-  ```
 
 - run the project as a daemon (from the repo root)
   ```

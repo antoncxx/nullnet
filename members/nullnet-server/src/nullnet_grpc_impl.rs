@@ -9,14 +9,14 @@ use crate::services::changes::{
 };
 use crate::services::clients::{Client, ClientInfo};
 use crate::services::edge::{Edge, RegisteredEdge};
-use crate::services::input::{ServicesToml, StackMap};
+use crate::services::input::{MatchIndex, ServicesToml, StackMap};
 use crate::services::service_info::{EgressPolicy, ServiceInfo, backend_involved_services};
 use crate::timeout::check_timeouts;
 use nullnet_grpc_lib::nullnet_grpc::nullnet_grpc_server::NullnetGrpc;
 use nullnet_grpc_lib::nullnet_grpc::{
     AgentEvent, BackendTriggerRequest, CertBundle, EgressDestinationReport, EgressPolicyCheck,
     EgressPolicyVerdict, EgressTriggerRequest, Empty, MsgId, Net, NetMessage, NetType, PortMapping,
-    PortMappingBundle, ProxyRequest, ServiceTrigger, Services, ServicesListResponse, Upstream,
+    PortMappingBundle, ProxyRequest, ServiceReport, ServiceTrigger, ServicesListResponse, Upstream,
     agent_event::Event as AgentEventKind,
 };
 use nullnet_liberror::{Error, ErrorHandler, Location, location};
@@ -31,6 +31,9 @@ use tonic::{Request, Response, Status, Streaming};
 pub(crate) struct NullnetGrpcImpl {
     /// The available services, partitioned by stack name.
     services: Arc<RwLock<StackMap>>,
+    /// Host-match index (stack → match entries), rebuilt alongside `services`.
+    /// Used to join a client's raw observations to the services it hosts.
+    match_index: Arc<RwLock<MatchIndex>>,
     /// Orchestrator to manage TAP-based clients and NET setups
     orchestrator: Orchestrator,
     /// Latest TLS certificate set, kept in sync with `./certs` by a watcher.
@@ -81,7 +84,9 @@ fn find_service_stack<'a>(services: &'a StackMap, service_name: &str) -> Option<
 
 impl NullnetGrpcImpl {
     pub async fn new() -> Result<Self, Error> {
-        let services = Arc::new(RwLock::new(ServicesToml::load_validated().await?));
+        let (stacks, index) = ServicesToml::load_validated().await?;
+        let services = Arc::new(RwLock::new(stacks));
+        let match_index = Arc::new(RwLock::new(index));
 
         // regenerate the service graphviz periodically for debugging
         let services_2 = services.clone();
@@ -98,12 +103,14 @@ impl NullnetGrpcImpl {
 
         // keep services up to date with the services.toml file
         let services_2 = services.clone();
+        let match_index_2 = match_index.clone();
         let orchestrator_2 = orchestrator.clone();
         let config_changed_2 = config_changed.clone();
         let port_mappings_changed_2 = port_mappings_changed.clone();
         tokio::spawn(async move {
             if let Err(e) = ServicesToml::watch(
                 &services_2,
+                &match_index_2,
                 orchestrator_2,
                 config_changed_2,
                 port_mappings_changed_2,
@@ -145,6 +152,7 @@ impl NullnetGrpcImpl {
 
         Ok(NullnetGrpcImpl {
             services,
+            match_index,
             orchestrator,
             certs: certs_rx,
             port_mappings: port_mappings_rx,
@@ -311,7 +319,7 @@ impl NullnetGrpcImpl {
 
     async fn services_list_impl(
         &self,
-        request: Request<Services>,
+        request: Request<ServiceReport>,
     ) -> Result<Response<ServicesListResponse>, Error> {
         let sender_ip = request
             .remote_addr()
@@ -319,53 +327,55 @@ impl NullnetGrpcImpl {
             .handle_err(location!())?
             .ip();
 
-        let req = request.into_inner();
+        let report = request.into_inner();
 
         println!(
-            "Received services list from '{}': {:?}",
-            sender_ip, req.services
+            "Received service report from '{}': {} container(s), {} listener(s)",
+            sender_ip,
+            report.containers.len(),
+            report.listeners.len()
         );
 
-        // Skip malformed/unsupported entries per-entry (emitting a warning
-        // event so the UI surfaces it) rather than failing the whole batch —
-        // one bad entry must not stop a node's valid services from registering.
+        // Join the sender's raw observations against the config match index. A
+        // container/listener may match several services across stacks; every
+        // match registers a replica.
         let mut service_list_by_stack: HashMap<String, Vec<(String, u16, Option<String>)>> =
             HashMap::new();
-        for s in req.services {
-            let skip = |reason: String| {
-                Event::service_declaration_skipped(sender_ip.to_string(), s.name.clone(), reason)
-            };
-            if s.stack.is_empty() {
-                self.orchestrator
-                    .events
-                    .emit(skip("missing required 'stack' field".to_string()))
-                    .await;
-                continue;
+        {
+            let index = self.match_index.read().await;
+            for (stack, entries) in index.iter() {
+                for entry in entries {
+                    if let Some(key) = &entry.docker_container {
+                        for c in report.containers.iter().filter(|c| &c.match_key == key) {
+                            // Docker services need VXLAN: VLAN setup only puts a
+                            // veth IP on the host, not into the container's netns.
+                            if *NET_TYPE == Net::Vlan {
+                                self.orchestrator
+                                    .events
+                                    .emit(Event::service_declaration_skipped(
+                                        sender_ip.to_string(),
+                                        entry.name.clone(),
+                                        "Docker services require VXLAN network type".to_string(),
+                                    ))
+                                    .await;
+                                continue;
+                            }
+                            service_list_by_stack
+                                .entry(stack.clone())
+                                .or_default()
+                                .push((entry.name.clone(), entry.port, Some(c.real_name.clone())));
+                        }
+                    }
+                    if let Some(path) = &entry.process_path
+                        && report.listeners.iter().any(|l| &l.path == path)
+                    {
+                        service_list_by_stack
+                            .entry(stack.clone())
+                            .or_default()
+                            .push((entry.name.clone(), entry.port, None));
+                    }
+                }
             }
-            // Docker services can only be wired into an overlay via VXLAN (the
-            // container's netns is plumbed by vxlan-setup); VLAN setup only puts
-            // a veth IP on the host.
-            if *NET_TYPE == Net::Vlan && s.docker_container.is_some() {
-                self.orchestrator
-                    .events
-                    .emit(skip(
-                        "Docker services require VXLAN network type".to_string(),
-                    ))
-                    .await;
-                continue;
-            }
-            let Ok(port) = u16::try_from(s.port) else {
-                self.orchestrator
-                    .events
-                    .emit(skip(format!("port {} out of range", s.port)))
-                    .await;
-                continue;
-            };
-            service_list_by_stack.entry(s.stack).or_default().push((
-                s.name,
-                port,
-                s.docker_container,
-            ));
         }
 
         self.apply_services_list_by_stack(sender_ip, &service_list_by_stack)
@@ -1361,6 +1371,7 @@ impl NullnetGrpcImpl {
         let (_, port_mappings) = watch::channel(PortMappingBundle::default());
         NullnetGrpcImpl {
             services: Arc::new(RwLock::new(services)),
+            match_index: Arc::new(RwLock::new(MatchIndex::new())),
             orchestrator: Orchestrator::new(),
             certs,
             port_mappings,
@@ -1389,7 +1400,7 @@ impl NullnetGrpc for NullnetGrpcImpl {
 
     async fn services_list(
         &self,
-        req: Request<Services>,
+        req: Request<ServiceReport>,
     ) -> Result<Response<ServicesListResponse>, Status> {
         self.services_list_impl(req)
             .await

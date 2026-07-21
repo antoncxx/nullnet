@@ -4,7 +4,7 @@ use crate::nullnet_grpc::nullnet_grpc_client::NullnetGrpcClient;
 use crate::nullnet_grpc::{
     AgentEvent, BackendTriggerRequest, CertBundle, EgressDestinationEntry, EgressDestinationReport,
     EgressPolicyCheck, EgressTriggerRequest, Empty, MsgId, NetMessage, NetType, PortMappingBundle,
-    ProxyRequest, Services, ServicesListResponse, Upstream,
+    ProxyRequest, ServiceReport, ServicesListResponse, Upstream,
 };
 pub use proto::*;
 use tokio::sync::mpsc;
@@ -91,7 +91,10 @@ impl NullnetGrpcInterface {
     }
 
     #[allow(clippy::missing_errors_doc)]
-    pub async fn services_list(&self, message: Services) -> Result<ServicesListResponse, String> {
+    pub async fn services_list(
+        &self,
+        message: ServiceReport,
+    ) -> Result<ServicesListResponse, String> {
         self.client
             .clone()
             .services_list(Request::new(message))

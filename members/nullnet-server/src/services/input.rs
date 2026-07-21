@@ -20,20 +20,60 @@ const SERVICES_DIR: &str = "./services";
 /// Top-level state: stack name → per-stack service map.
 pub(crate) type StackMap = HashMap<String, HashMap<String, ServiceInfo>>;
 
+/// A service's host-match keys + backend port, used to join client observations
+/// to `(stack, service)`. Built from config; an observation may match several.
+#[derive(Clone, Debug)]
+pub(crate) struct MatchEntry {
+    pub(crate) name: String,
+    pub(crate) port: u16,
+    pub(crate) docker_container: Option<String>,
+    pub(crate) process_path: Option<String>,
+}
+
+/// Stack name → its services' match entries. Rebuilt on every load/reload.
+pub(crate) type MatchIndex = HashMap<String, Vec<MatchEntry>>;
+
+/// Match entries for one file: only services with a match key are hostable, and
+/// such a service must declare a `port`.
+fn build_match_entries(services: &[ServiceToml]) -> Result<Vec<MatchEntry>, Error> {
+    let mut entries = Vec::new();
+    for s in services {
+        if s.docker_container.is_none() && s.process_path.is_none() {
+            continue;
+        }
+        let Some(port) = s.port else {
+            return Err(format!(
+                "service '{}': has a host-match key (docker_container/process_path) but no 'port'",
+                s.name
+            ))
+            .handle_err(location!());
+        };
+        entries.push(MatchEntry {
+            name: s.name.clone(),
+            port,
+            docker_container: s.docker_container.clone(),
+            process_path: s.process_path.clone(),
+        });
+    }
+    Ok(entries)
+}
+
 #[derive(Deserialize)]
 pub(crate) struct ServicesToml {
     services: Vec<ServiceToml>,
 }
 
 impl ServicesToml {
-    pub(crate) async fn load() -> Result<StackMap, Error> {
+    pub(crate) async fn load() -> Result<(StackMap, MatchIndex), Error> {
         Self::load_from_dir(SERVICES_DIR).await
     }
 
     /// Load every `*.toml` file under `dir`; the file stem is the stack name.
-    pub(crate) async fn load_from_dir(dir: &str) -> Result<StackMap, Error> {
+    /// Returns the service map and the parallel host-match index.
+    pub(crate) async fn load_from_dir(dir: &str) -> Result<(StackMap, MatchIndex), Error> {
         let mut entries = tokio::fs::read_dir(dir).await.handle_err(location!())?;
         let mut stacks: StackMap = HashMap::new();
+        let mut index: MatchIndex = HashMap::new();
         while let Some(entry) = entries.next_entry().await.handle_err(location!())? {
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) != Some("toml") {
@@ -46,24 +86,25 @@ impl ServicesToml {
             else {
                 continue;
             };
-            let services = parse_file(&path).await?;
+            let (services, match_entries) = parse_file(&path).await?;
             println!("Loaded stack '{stack}': {services:?}");
-            stacks.insert(stack, services);
+            stacks.insert(stack.clone(), services);
+            index.insert(stack, match_entries);
         }
-        Ok(stacks)
+        Ok((stacks, index))
     }
 
     /// Load a single file as one stack's service map. Used by tests.
     #[cfg(test)]
     pub(crate) async fn load_file(path: &str) -> Result<HashMap<String, ServiceInfo>, Error> {
-        parse_file(Path::new(path)).await
+        Ok(parse_file(Path::new(path)).await?.0)
     }
 
     /// Load every stack and fail loudly if any `(protocol, listen_port)` pair
     /// is claimed by more than one service — ports are global on the proxy,
     /// unlike service names which only need to be unique within a stack.
-    pub(crate) async fn load_validated() -> Result<StackMap, Error> {
-        let stacks = Self::load().await?;
+    pub(crate) async fn load_validated() -> Result<(StackMap, MatchIndex), Error> {
+        let (stacks, index) = Self::load().await?;
         let conflicts = detect_port_conflicts(&stacks);
         if let Some(first) = conflicts.first() {
             return Err(format!(
@@ -79,7 +120,7 @@ impl ServicesToml {
             ))
             .handle_err(location!());
         }
-        Ok(stacks)
+        Ok((stacks, index))
     }
 
     /// `config_changed` and `port_mappings_changed` are separate `Notify`s —
@@ -89,6 +130,7 @@ impl ServicesToml {
     /// them race for each wake-up instead of both reliably observing it.
     pub(crate) async fn watch(
         services: &Arc<RwLock<StackMap>>,
+        match_index: &Arc<RwLock<MatchIndex>>,
         orchestrator: Orchestrator,
         config_changed: Arc<Notify>,
         port_mappings_changed: Arc<Notify>,
@@ -126,12 +168,13 @@ impl ServicesToml {
                     // ensure file changes are propagated
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     match ServicesToml::load().await {
-                        Ok(loaded_services) => {
+                        Ok((loaded_services, loaded_index)) => {
                             let conflicts = detect_port_conflicts(&loaded_services);
                             if conflicts.is_empty() {
                                 let services_mut = &mut *services.write().await;
                                 apply_config_update(services_mut, loaded_services, &orchestrator)
                                     .await;
+                                *match_index.write().await = loaded_index;
                                 config_changed.notify_one();
                                 port_mappings_changed.notify_one();
                             } else {
@@ -299,12 +342,13 @@ fn upper(list: Vec<String>) -> Vec<String> {
     list.into_iter().map(|c| c.to_uppercase()).collect()
 }
 
-async fn parse_file(path: &Path) -> Result<HashMap<String, ServiceInfo>, Error> {
+async fn parse_file(path: &Path) -> Result<(HashMap<String, ServiceInfo>, Vec<MatchEntry>), Error> {
     let str_repr = tokio::fs::read_to_string(path)
         .await
         .handle_err(location!())?;
     let parsed: ServicesToml = toml::from_str(&str_repr).handle_err(location!())?;
-    parsed.services_map()
+    let match_entries = build_match_entries(&parsed.services)?;
+    Ok((parsed.services_map()?, match_entries))
 }
 
 /// All non-default egress policies, keyed by (stack, service) — the comparable
@@ -380,6 +424,17 @@ pub(crate) async fn apply_config_update(
 #[derive(Deserialize)]
 struct ServiceToml {
     name: String,
+    /// Host-match key for a Docker service: the Swarm service label
+    /// (`com.docker.swarm.service.name`) or, in standalone mode, the container
+    /// name. A running container whose label equals this registers a replica.
+    docker_container: Option<String>,
+    /// Host-match key for a non-Docker service: the listening process's exe path
+    /// (`/proc/<pid>/exe`). A listener with this path registers a replica.
+    process_path: Option<String>,
+    /// Backend port the overlay/proxy connects to on this service's replicas.
+    /// Required when any host-match key is set. Distinct from `listen_port`
+    /// (the proxy's external tcp/udp front port).
+    port: Option<u16>,
     /// Proxy-reachability for this service. Present → reachable entry point
     /// with this per-client timeout in seconds (0 disables the timeout).
     /// Omitted → not proxy-reachable (backend-only); the service is still
@@ -556,7 +611,7 @@ timeout = 30
             .await
             .unwrap();
 
-        let stacks = ServicesToml::load_from_dir(dir.to_str().unwrap())
+        let (stacks, _index) = ServicesToml::load_from_dir(dir.to_str().unwrap())
             .await
             .expect("load");
 

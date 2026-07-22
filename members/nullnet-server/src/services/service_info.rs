@@ -28,25 +28,26 @@ pub(crate) fn backend_involved_services(
     pinned
 }
 
-/// Per-service egress country policy from the stack TOML (ISO alpha-2 codes,
-/// stored uppercase). `Blocked` denies the listed countries (unknown → allow);
-/// `Allowed` permits only the listed ones (unknown → deny).
+/// Per-service country policy from the stack TOML (ISO alpha-2 codes, stored
+/// uppercase). Used for both directions: egress (destination country) and
+/// ingress (proxy-client source country). `Blocked` denies the listed countries
+/// (unknown → allow); `Allowed` permits only the listed ones (unknown → deny).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) enum EgressPolicy {
+pub(crate) enum CountryPolicy {
     #[default]
     None,
     Blocked(Vec<String>),
     Allowed(Vec<String>),
 }
 
-impl EgressPolicy {
+impl CountryPolicy {
     /// Whether a destination in `country` (uppercase alpha-2; `None` = unknown)
     /// may be contacted under this policy.
     pub(crate) fn allows(&self, country: Option<&str>) -> bool {
         match self {
-            EgressPolicy::None => true,
-            EgressPolicy::Blocked(list) => country.is_none_or(|c| !list.iter().any(|b| b == c)),
-            EgressPolicy::Allowed(list) => country.is_some_and(|c| list.iter().any(|a| a == c)),
+            CountryPolicy::None => true,
+            CountryPolicy::Blocked(list) => country.is_none_or(|c| !list.iter().any(|b| b == c)),
+            CountryPolicy::Allowed(list) => country.is_some_and(|c| list.iter().any(|a| a == c)),
         }
     }
 }
@@ -66,7 +67,8 @@ impl ServiceInfo {
         max_networks: Option<u32>,
         protocol: ServiceProtocol,
         listen_port: Option<u16>,
-        egress_policy: EgressPolicy,
+        egress_policy: CountryPolicy,
+        ingress_policy: CountryPolicy,
     ) -> Self {
         ServiceInfo::Unregistered(UnregisteredServiceInfo::new(
             proxy_deps,
@@ -76,6 +78,7 @@ impl ServiceInfo {
             protocol,
             listen_port,
             egress_policy,
+            ingress_policy,
         ))
     }
 
@@ -90,6 +93,7 @@ impl ServiceInfo {
                     protocol: unreg.protocol,
                     listen_port: unreg.listen_port,
                     egress_policy: unreg.egress_policy.clone(),
+                    ingress_policy: unreg.ingress_policy.clone(),
                     replicas: vec![Replica::new(ip, port, docker_container)],
                 });
             }
@@ -131,6 +135,7 @@ impl ServiceInfo {
                     reg.protocol,
                     reg.listen_port,
                     reg.egress_policy.clone(),
+                    reg.ingress_policy.clone(),
                 ));
             }
         }
@@ -151,6 +156,7 @@ impl ServiceInfo {
                     reg.protocol,
                     reg.listen_port,
                     reg.egress_policy.clone(),
+                    reg.ingress_policy.clone(),
                 ));
             }
         }
@@ -169,6 +175,7 @@ impl ServiceInfo {
         let loaded_protocol = loaded.protocol();
         let loaded_listen_port = loaded.listen_port();
         let loaded_egress_policy = loaded.egress_policy().clone();
+        let loaded_ingress_policy = loaded.ingress_policy().clone();
         match self {
             ServiceInfo::Unregistered(unreg) => {
                 unreg.proxy_deps = loaded.proxy_deps().to_vec();
@@ -178,6 +185,7 @@ impl ServiceInfo {
                 unreg.protocol = loaded_protocol;
                 unreg.listen_port = loaded_listen_port;
                 unreg.egress_policy = loaded_egress_policy;
+                unreg.ingress_policy = loaded_ingress_policy;
             }
             ServiceInfo::Registered(reg) => {
                 reg.proxy_deps = loaded.proxy_deps().to_vec();
@@ -187,15 +195,25 @@ impl ServiceInfo {
                 reg.protocol = loaded_protocol;
                 reg.listen_port = loaded_listen_port;
                 reg.egress_policy = loaded_egress_policy;
+                reg.ingress_policy = loaded_ingress_policy;
             }
         }
     }
 
     /// Egress country policy declared for this service (default: none).
-    pub(crate) fn egress_policy(&self) -> &EgressPolicy {
+    pub(crate) fn egress_policy(&self) -> &CountryPolicy {
         match self {
             ServiceInfo::Unregistered(unreg) => &unreg.egress_policy,
             ServiceInfo::Registered(reg) => &reg.egress_policy,
+        }
+    }
+
+    /// Ingress country policy declared for this service — evaluated against the
+    /// proxy client's source country for proxy-reachable services (default: none).
+    pub(crate) fn ingress_policy(&self) -> &CountryPolicy {
+        match self {
+            ServiceInfo::Unregistered(unreg) => &unreg.ingress_policy,
+            ServiceInfo::Registered(reg) => &reg.ingress_policy,
         }
     }
 
@@ -263,7 +281,9 @@ pub(crate) struct UnregisteredServiceInfo {
     /// External port the proxy binds to for `Tcp`/`Udp` services.
     listen_port: Option<u16>,
     /// Egress country policy for this service's external traffic.
-    egress_policy: EgressPolicy,
+    egress_policy: CountryPolicy,
+    /// Ingress country policy for external clients reaching this service via the proxy.
+    ingress_policy: CountryPolicy,
 }
 
 impl UnregisteredServiceInfo {
@@ -275,7 +295,8 @@ impl UnregisteredServiceInfo {
         max_networks: Option<u32>,
         protocol: ServiceProtocol,
         listen_port: Option<u16>,
-        egress_policy: EgressPolicy,
+        egress_policy: CountryPolicy,
+        ingress_policy: CountryPolicy,
     ) -> Self {
         Self {
             proxy_deps,
@@ -285,6 +306,7 @@ impl UnregisteredServiceInfo {
             protocol,
             listen_port,
             egress_policy,
+            ingress_policy,
         }
     }
 }
@@ -373,7 +395,9 @@ pub(crate) struct RegisteredServiceInfo {
     /// External port the proxy binds to for `Tcp`/`Udp` services.
     listen_port: Option<u16>,
     /// Egress country policy for this service's external traffic.
-    egress_policy: EgressPolicy,
+    egress_policy: CountryPolicy,
+    /// Ingress country policy for external clients reaching this service via the proxy.
+    ingress_policy: CountryPolicy,
     /// Replicas of this service.
     replicas: Vec<Replica>,
 }

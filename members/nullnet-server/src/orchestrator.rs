@@ -308,6 +308,18 @@ impl Orchestrator {
         Ok(true)
     }
 
+    /// Kick off (cached, once-per-IP) geo/ASN enrichment for an ingress client IP.
+    /// Fire-and-forget; the resolved value is read later via `geo_get`.
+    pub(crate) fn ensure_geo(&self, ip: Ipv4Addr) {
+        self.geo.ensure(ip);
+    }
+
+    /// Cached geo/ASN for `ip`, if resolved yet — inlined into session JSON so the
+    /// UI can render an ingress IP's flag + ASN (mirrors egress destinations).
+    pub(crate) fn geo_get(&self, ip: Ipv4Addr) -> Option<GeoInfo> {
+        self.geo.get(ip)
+    }
+
     /// Snapshot the live egress edges (initiator replica -> proxy) for topology
     /// rendering. Reservations that never completed (`net_id == 0`) are omitted.
     pub(crate) async fn egress_edges_snapshot(&self) -> Vec<EgressEdgeInfo> {

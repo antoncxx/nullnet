@@ -2816,7 +2816,6 @@ dependencies = [
  "rtnetlink",
  "serde",
  "tokio",
- "toml",
  "tun-rs",
 ]
 

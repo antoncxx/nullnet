@@ -39,3 +39,33 @@ pub static ENCRYPTION_ENABLED: std::sync::LazyLock<bool> =
         Ok(s) => !matches!(s.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"),
         Err(_) => true,
     });
+
+/// Global destination-port allowlists for every client's host-NIC eBPF firewall.
+/// Decided once here (single point of decision) and pushed to each node in the
+/// `NetworkType` response; nothing is hardcoded, so every host-service allow is
+/// opt-in. Comma-separated ports, keyed by direction and protocol:
+///   - `INGRESS_ALLOW_TCP_PORTS` — local TCP listeners (e.g. `22,80,443`).
+///   - `INGRESS_ALLOW_UDP_PORTS` — local UDP listeners (e.g. Swarm gossip `7946`).
+///   - `EGRESS_ALLOW_TCP_PORTS`  — TCP dsts a node may initiate to.
+///   - `EGRESS_ALLOW_UDP_PORTS`  — UDP dsts a node may initiate to (e.g. DNS `53`).
+///
+/// ICMP is portless and always allowed; CT-tracked returns and nullnet's own
+/// control/data plane are always allowed too.
+pub static INGRESS_ALLOW_TCP_PORTS: std::sync::LazyLock<Vec<u32>> =
+    std::sync::LazyLock::new(|| env_ports("INGRESS_ALLOW_TCP_PORTS"));
+pub static INGRESS_ALLOW_UDP_PORTS: std::sync::LazyLock<Vec<u32>> =
+    std::sync::LazyLock::new(|| env_ports("INGRESS_ALLOW_UDP_PORTS"));
+pub static EGRESS_ALLOW_TCP_PORTS: std::sync::LazyLock<Vec<u32>> =
+    std::sync::LazyLock::new(|| env_ports("EGRESS_ALLOW_TCP_PORTS"));
+pub static EGRESS_ALLOW_UDP_PORTS: std::sync::LazyLock<Vec<u32>> =
+    std::sync::LazyLock::new(|| env_ports("EGRESS_ALLOW_UDP_PORTS"));
+
+/// Parse a comma-separated port list from `name` (blank/invalid entries skipped).
+/// Kept as `u32` to match the proto wire type; the client casts to `u16`.
+fn env_ports(name: &str) -> Vec<u32> {
+    std::env::var(name)
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|p| p.trim().parse::<u16>().ok().map(u32::from))
+        .collect()
+}

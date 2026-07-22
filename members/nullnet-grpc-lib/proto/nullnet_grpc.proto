@@ -8,9 +8,11 @@ service NullnetGrpc {
   // Network type declaration
   rpc NetworkType(Empty) returns (NetType);
 
-  // Services list — response carries the trigger ports the caller should
-  // observe locally for the services it just declared as hosting.
-  rpc ServicesList(Services) returns (ServicesListResponse);
+  // Host report — the client sends its raw local observations (running
+  // containers + listening processes); the server joins them against the
+  // per-stack service config. The response carries the trigger ports the
+  // caller should observe locally for the services it was matched to.
+  rpc ServicesList(ServiceReport) returns (ServicesListResponse);
 
   // Control channel
   rpc ControlChannel(stream MsgId) returns (stream NetMessage);
@@ -41,6 +43,13 @@ service NullnetGrpc {
   // service's allowed_/blocked_countries lists. The client caches verdicts.
   rpc CheckEgressDestination(EgressPolicyCheck) returns (EgressPolicyVerdict);
 
+  // Ingress country-policy check for a proxy-reachable service: the proxy asks
+  // whether an external client (by source IP) may reach the named service. The
+  // server resolves the client IP's country and evaluates the service's ingress
+  // allowed_/blocked_countries lists. HTTP denials become a 403; raw tcp/udp
+  // denials close the connection.
+  rpc CheckIngress(IngressPolicyCheck) returns (IngressPolicyVerdict);
+
   // Report an event from a client or proxy agent back to the server.
   rpc ReportEvent(AgentEvent) returns (Empty);
 
@@ -63,6 +72,16 @@ service NullnetGrpc {
 
 message NetType {
    Net net = 1;
+   // Host-NIC eBPF firewall policy, decided globally by the server (single point
+   // of decision) and applied by the client at startup. Ports are u16 on the
+   // wire's uint32. `egress_gateway` is derived server-side: true iff the caller
+   // is the configured PROXY_IP (the egress boundary node), so clients no longer
+   // carry an EGRESS_GATEWAY flag of their own.
+   repeated uint32 ingress_allow_tcp_ports = 2;
+   repeated uint32 ingress_allow_udp_ports = 3;
+   repeated uint32 egress_allow_tcp_ports = 4;
+   repeated uint32 egress_allow_udp_ports = 5;
+   bool egress_gateway = 6;
 }
 
 enum Net {
@@ -186,15 +205,20 @@ message MsgId {
   string id = 1;
 }
 
-message Services {
-  repeated Service services = 1;
+// Raw local observations a client reports; the server joins them against the
+// match keys in services/<stack>.toml. One observation may match many services.
+message ServiceReport {
+  repeated Container containers = 1;
+  repeated Listener listeners = 2;
 }
 
-message Service {
-  string name = 1;
-  uint32 port = 2;
-  optional string docker_container = 3;
-  string stack = 4;
+message Container {
+  string match_key = 1;  // matched against a service's docker_container (Swarm label / container name)
+  string real_name = 2;  // actual container name; stored as the replica identity
+}
+
+message Listener {
+  string path = 1;  // /proc/<pid>/exe of the listening process; matched against process_path
 }
 
 // Response to ServicesList: per-declared-service, the set of trigger ports
@@ -312,6 +336,15 @@ message EgressPolicyCheck {
 }
 
 message EgressPolicyVerdict {
+  bool allowed = 1;
+}
+
+message IngressPolicyCheck {
+  string service_name = 1;
+  string client_ip = 2;
+}
+
+message IngressPolicyVerdict {
   bool allowed = 1;
 }
 

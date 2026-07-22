@@ -3,8 +3,8 @@ mod proto;
 use crate::nullnet_grpc::nullnet_grpc_client::NullnetGrpcClient;
 use crate::nullnet_grpc::{
     AgentEvent, BackendTriggerRequest, CertBundle, EgressDestinationEntry, EgressDestinationReport,
-    EgressPolicyCheck, EgressTriggerRequest, Empty, MsgId, NetMessage, NetType, PortMappingBundle,
-    ProxyRequest, Services, ServicesListResponse, Upstream,
+    EgressPolicyCheck, EgressTriggerRequest, Empty, IngressPolicyCheck, MsgId, NetMessage, NetType,
+    PortMappingBundle, ProxyRequest, ServiceReport, ServicesListResponse, Upstream,
 };
 pub use proto::*;
 use tokio::sync::mpsc;
@@ -91,7 +91,10 @@ impl NullnetGrpcInterface {
     }
 
     #[allow(clippy::missing_errors_doc)]
-    pub async fn services_list(&self, message: Services) -> Result<ServicesListResponse, String> {
+    pub async fn services_list(
+        &self,
+        message: ServiceReport,
+    ) -> Result<ServicesListResponse, String> {
         self.client
             .clone()
             .services_list(Request::new(message))
@@ -169,6 +172,26 @@ impl NullnetGrpcInterface {
             .check_egress_destination(Request::new(EgressPolicyCheck {
                 initiator_container,
                 dst_ip,
+            }))
+            .await
+            .map(|resp| resp.into_inner().allowed)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Ask whether the ingress country policy allows an external client at
+    /// `client_ip` to reach `service_name`. Called by the proxy per request/
+    /// connection before resolving an upstream.
+    #[allow(clippy::missing_errors_doc)]
+    pub async fn check_ingress(
+        &self,
+        service_name: String,
+        client_ip: String,
+    ) -> Result<bool, String> {
+        self.client
+            .clone()
+            .check_ingress(Request::new(IngressPolicyCheck {
+                service_name,
+                client_ip,
             }))
             .await
             .map(|resp| resp.into_inner().allowed)

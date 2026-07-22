@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import { spRow, spKey, SpSep } from './panelStyles';
 import { useTopologyData, useTopologyUI } from './TopologyContext';
+import { flagEmoji, countryName } from '../../geo';
 
 function formatTime(unix: number): string {
   return new Date(unix * 1000).toLocaleTimeString([], { hour12: false });
@@ -61,9 +62,14 @@ export default function InternetPanel() {
             <div style={{ width: 6, height: 6, borderRadius: '50%', background: isFocused ? 'var(--blue)' : 'rgba(91,156,246,.4)', flexShrink: 0 }} />
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 11, fontFamily: "'JetBrains Mono',monospace", color: isFocused ? 'var(--t0)' : 'var(--t1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {flagEmoji(s.country_code) && (
+                  <span title={countryName(s.country_code)} style={{ marginRight: 5, cursor: 'default' }}>{flagEmoji(s.country_code)}</span>
+                )}
                 {s.client_ip}
               </div>
-              <div style={{ fontSize: 9.5, color: 'var(--t2)' }}>{s.service}</div>
+              <div style={{ fontSize: 9.5, color: 'var(--t2)' }}>
+                {s.service}{s.org ? ` · ${s.org}` : ''}
+              </div>
             </div>
             <div style={{ flexShrink: 0, textAlign: 'right' }}>
               <div style={{ fontSize: 9.5, fontFamily: "'JetBrains Mono',monospace", color: 'var(--cyan)' }}>

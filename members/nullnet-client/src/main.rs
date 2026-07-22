@@ -15,8 +15,8 @@ use crate::triggers::TriggersState;
 use clap::Parser;
 use nullnet_grpc_lib::NullnetGrpcInterface;
 use nullnet_grpc_lib::nullnet_grpc::{
-    AgentEvent, AgentServicesListUpdateFailed, AgentServicesListUpdated, Net, Services,
-    agent_event::Event as AgentEventKind,
+    AgentEvent, AgentServicesListUpdateFailed, AgentServicesListUpdated, Container, Listener, Net,
+    NetType, ServiceReport, agent_event::Event as AgentEventKind,
 };
 use nullnet_liberror::{Error, ErrorHandler, Location, location};
 use std::collections::HashMap;
@@ -99,7 +99,7 @@ async fn main() -> Result<(), Error> {
     // control channel learns peers so its add()/remove() land in the PEERS map.
     // Held alive for the whole run (drop = detach). Fails closed: any error
     // aborts startup rather than running unprotected.
-    let ebpf_firewall = match setup_ebpf_firewall(&rtnetlink_handle).await {
+    let ebpf_firewall = match setup_ebpf_firewall(&rtnetlink_handle, &net_type).await {
         Ok(fw) => {
             println!("eBPF host firewall enabled (strict nullnet-only)");
             fw
@@ -205,7 +205,10 @@ fn print_info(net: Net) {
 /// Resolve, attach, and return the host-NIC eBPF firewall. Fails closed: any
 /// problem (unresolvable server, missing NIC, load error) aborts startup rather
 /// than running unprotected.
-async fn setup_ebpf_firewall(rtnetlink_handle: &RtNetLinkHandle) -> Result<ebpf::Firewall, Error> {
+async fn setup_ebpf_firewall(
+    rtnetlink_handle: &RtNetLinkHandle,
+    net_type: &NetType,
+) -> Result<ebpf::Firewall, Error> {
     let server_ip = resolve_server_ip()
         .ok_or("could not resolve CONTROL_SERVICE_ADDR to an IPv4 address")
         .handle_err(location!())?;
@@ -225,14 +228,23 @@ async fn setup_ebpf_firewall(rtnetlink_handle: &RtNetLinkHandle) -> Result<ebpf:
         .ok_or("could not find the ethernet interface name")
         .handle_err(location!())?;
 
+    // Firewall policy is decided globally by the server and delivered in the
+    // NetworkType response (fetched before this runs). Ports arrive as u16-in-u32;
+    // skip any out-of-range value rather than silently truncating it to a port.
+    let to_u16 = |ports: &[u32]| {
+        ports
+            .iter()
+            .filter_map(|&p| u16::try_from(p).ok())
+            .collect::<Vec<u16>>()
+    };
     let cfg = ebpf::FirewallConfig {
         server_ip,
         control_port: *CONTROL_SERVICE_PORT,
-        egress_gateway: *crate::env::EGRESS_GATEWAY,
-        ingress_tcp: crate::env::INGRESS_ALLOW_TCP_PORTS.clone(),
-        ingress_udp: crate::env::INGRESS_ALLOW_UDP_PORTS.clone(),
-        egress_tcp: crate::env::EGRESS_ALLOW_TCP_PORTS.clone(),
-        egress_udp: crate::env::EGRESS_ALLOW_UDP_PORTS.clone(),
+        egress_gateway: net_type.egress_gateway,
+        ingress_tcp: to_u16(&net_type.ingress_allow_tcp_ports),
+        ingress_udp: to_u16(&net_type.ingress_allow_udp_ports),
+        egress_tcp: to_u16(&net_type.egress_allow_tcp_ports),
+        egress_udp: to_u16(&net_type.egress_allow_udp_ports),
     };
     if cfg.egress_gateway {
         println!(
@@ -281,60 +293,50 @@ async fn declare_services(
     config_tx: UnboundedSender<HashMap<u16, String>>,
     docker_changed: Arc<Notify>,
 ) -> Result<(), Error> {
-    let mut last_declared: Vec<nullnet_grpc_lib::nullnet_grpc::Service> = Vec::new();
+    let mut last_snapshot: Vec<String> = Vec::new();
     loop {
-        // read services from file
-        let services_toml = tokio::fs::read_to_string("services.toml")
+        // Report raw local observations; the server joins them against its
+        // per-stack config to decide what this node hosts. Running containers:
+        // logical (Swarm label / name) -> real container name(s).
+        let containers: Vec<Container> = get_running_docker_containers()
             .await
-            .handle_err(location!())?;
-        let mut services: Services = toml::from_str(&services_toml).handle_err(location!())?;
+            .into_iter()
+            .flat_map(|(match_key, real_names)| {
+                real_names.into_iter().map(move |real_name| Container {
+                    match_key: match_key.clone(),
+                    real_name,
+                })
+            })
+            .collect();
 
-        // get the map of logical name -> real container name (supports both standalone and Swarm)
-        let running_containers = get_running_docker_containers().await;
-        // get the list of actively listening ports on the host
-        let listeners = listeners::get_all().handle_err(location!())?;
+        // One Listener per distinct listening process, keyed by exe path.
+        let mut paths: Vec<String> = listeners::get_all()
+            .handle_err(location!())?
+            .into_iter()
+            .map(|l| l.process.path)
+            .collect();
+        paths.sort_unstable();
+        paths.dedup();
+        let report = ServiceReport {
+            containers,
+            listeners: paths.into_iter().map(|path| Listener { path }).collect(),
+        };
 
-        // only declare services that are actually running
-        // For Swarm, a single service name may map to multiple containers (replicas),
-        // so we expand each service entry into one entry per running container.
-        let file_services = services.services;
-        services.services = Vec::new();
-        for service in file_services {
-            if let Some(container) = &service.docker_container {
-                if let Some(real_names) = running_containers.get(container.as_str()) {
-                    for real_name in real_names {
-                        let mut s = service.clone();
-                        s.docker_container = Some(real_name.clone());
-                        services.services.push(s);
-                    }
-                }
-            } else {
-                // Host services: only declare if the port is actively listening
-                if listeners
-                    .iter()
-                    .any(|listener| u32::from(listener.socket.port()) == service.port)
-                {
-                    services.services.push(service);
-                }
-            }
-        }
-
-        println!("Declaring services to gRPC server: {services:?}");
-        let num_services = services.services.len() as u32;
+        println!("Reporting to gRPC server: {report:?}");
+        let num_services = (report.containers.len() + report.listeners.len()) as u32;
 
         // canonical snapshot for change detection (order-independent)
-        let mut current = services.services.clone();
-        current.sort_by(|a, b| {
-            a.name
-                .cmp(&b.name)
-                .then(a.stack.cmp(&b.stack))
-                .then(a.port.cmp(&b.port))
-                .then(a.docker_container.cmp(&b.docker_container))
-        });
+        let mut snapshot: Vec<String> = report
+            .containers
+            .iter()
+            .map(|c| format!("c:{}|{}", c.match_key, c.real_name))
+            .chain(report.listeners.iter().map(|l| format!("l:{}", l.path)))
+            .collect();
+        snapshot.sort_unstable();
 
-        // send services to gRPC server; response carries the trigger ports
-        // attached to the services we just declared as hosting.
-        match grpc_server.services_list(services).await {
+        // send observations to gRPC server; response carries the trigger ports
+        // attached to the services the server matched us to.
+        match grpc_server.services_list(report).await {
             Err(e) => {
                 eprintln!("services_list failed: {e}");
                 let grpc = grpc_server.clone();
@@ -353,8 +355,8 @@ async fn declare_services(
                 });
             }
             Ok(response) => {
-                if current != last_declared {
-                    last_declared = current;
+                if snapshot != last_snapshot {
+                    last_snapshot = snapshot;
                     let grpc = grpc_server.clone();
                     tokio::spawn(async move {
                         let _ = grpc

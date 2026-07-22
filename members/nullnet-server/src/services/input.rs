@@ -1,12 +1,14 @@
 use crate::events::Event as ServerEvent;
 use crate::orchestrator::Orchestrator;
-use crate::services::changes::{apply_changes, detect_config_changes};
-use crate::services::service_info::{EgressPolicy, ServiceInfo};
+use crate::services::changes::{ServiceChange, apply_changes, detect_config_changes};
+use crate::services::clients::Client;
+use crate::services::service_info::{CountryPolicy, ServiceInfo};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use nullnet_grpc_lib::nullnet_grpc::ServiceProtocol;
 use nullnet_liberror::{Error, ErrorHandler, Location, location};
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::net::Ipv4Addr;
 use std::ops::Sub;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,20 +22,60 @@ const SERVICES_DIR: &str = "./services";
 /// Top-level state: stack name → per-stack service map.
 pub(crate) type StackMap = HashMap<String, HashMap<String, ServiceInfo>>;
 
+/// A service's host-match keys + backend port, used to join client observations
+/// to `(stack, service)`. Built from config; an observation may match several.
+#[derive(Clone, Debug)]
+pub(crate) struct MatchEntry {
+    pub(crate) name: String,
+    pub(crate) port: u16,
+    pub(crate) docker_container: Option<String>,
+    pub(crate) process_path: Option<String>,
+}
+
+/// Stack name → its services' match entries. Rebuilt on every load/reload.
+pub(crate) type MatchIndex = HashMap<String, Vec<MatchEntry>>;
+
+/// Match entries for one file: only services with a match key are hostable, and
+/// such a service must declare a `port`.
+fn build_match_entries(services: &[ServiceToml]) -> Result<Vec<MatchEntry>, Error> {
+    let mut entries = Vec::new();
+    for s in services {
+        if s.docker_container.is_none() && s.process_path.is_none() {
+            continue;
+        }
+        let Some(port) = s.port else {
+            return Err(format!(
+                "service '{}': has a host-match key (docker_container/process_path) but no 'port'",
+                s.name
+            ))
+            .handle_err(location!());
+        };
+        entries.push(MatchEntry {
+            name: s.name.clone(),
+            port,
+            docker_container: s.docker_container.clone(),
+            process_path: s.process_path.clone(),
+        });
+    }
+    Ok(entries)
+}
+
 #[derive(Deserialize)]
 pub(crate) struct ServicesToml {
     services: Vec<ServiceToml>,
 }
 
 impl ServicesToml {
-    pub(crate) async fn load() -> Result<StackMap, Error> {
+    pub(crate) async fn load() -> Result<(StackMap, MatchIndex), Error> {
         Self::load_from_dir(SERVICES_DIR).await
     }
 
     /// Load every `*.toml` file under `dir`; the file stem is the stack name.
-    pub(crate) async fn load_from_dir(dir: &str) -> Result<StackMap, Error> {
+    /// Returns the service map and the parallel host-match index.
+    pub(crate) async fn load_from_dir(dir: &str) -> Result<(StackMap, MatchIndex), Error> {
         let mut entries = tokio::fs::read_dir(dir).await.handle_err(location!())?;
         let mut stacks: StackMap = HashMap::new();
+        let mut index: MatchIndex = HashMap::new();
         while let Some(entry) = entries.next_entry().await.handle_err(location!())? {
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) != Some("toml") {
@@ -46,40 +88,45 @@ impl ServicesToml {
             else {
                 continue;
             };
-            let services = parse_file(&path).await?;
+            let (services, match_entries) = parse_file(&path).await?;
             println!("Loaded stack '{stack}': {services:?}");
-            stacks.insert(stack, services);
+            stacks.insert(stack.clone(), services);
+            index.insert(stack, match_entries);
         }
-        Ok(stacks)
+        Ok((stacks, index))
     }
 
     /// Load a single file as one stack's service map. Used by tests.
     #[cfg(test)]
     pub(crate) async fn load_file(path: &str) -> Result<HashMap<String, ServiceInfo>, Error> {
-        parse_file(Path::new(path)).await
+        Ok(parse_file(Path::new(path)).await?.0)
     }
 
     /// Load every stack and fail loudly if any `(protocol, listen_port)` pair
     /// is claimed by more than one service — ports are global on the proxy,
     /// unlike service names which only need to be unique within a stack.
-    pub(crate) async fn load_validated() -> Result<StackMap, Error> {
-        let stacks = Self::load().await?;
+    pub(crate) async fn load_validated() -> Result<(StackMap, MatchIndex), Error> {
+        let (mut stacks, mut index) = Self::load().await?;
+        // Don't brick the control plane on a port conflict (e.g. a bad UI edit or
+        // hand-edited file left two stacks claiming the same listen_port). Drop the
+        // offending stacks and start anyway, logging loudly — the reload path is
+        // likewise tolerant, and an operator can fix the files without downtime.
         let conflicts = detect_port_conflicts(&stacks);
-        if let Some(first) = conflicts.first() {
-            return Err(format!(
-                "port mapping conflict: {} other conflict(s); stack '{}' service '{}' and stack '{}' \
-                 service '{}' both claim {:?}/{}",
-                conflicts.len() - 1,
-                first.stack_a,
-                first.service_a,
-                first.stack_b,
-                first.service_b,
-                first.protocol,
-                first.listen_port
-            ))
-            .handle_err(location!());
+        let mut bad: HashSet<String> = HashSet::new();
+        for c in &conflicts {
+            eprintln!(
+                "[config] port conflict on startup: {:?}/{} claimed by '{}'/'{}' and '{}'/'{}' — \
+                 dropping these stacks until fixed",
+                c.protocol, c.listen_port, c.stack_a, c.service_a, c.stack_b, c.service_b
+            );
+            bad.insert(c.stack_a.clone());
+            bad.insert(c.stack_b.clone());
         }
-        Ok(stacks)
+        for stack in &bad {
+            stacks.remove(stack);
+            index.remove(stack);
+        }
+        Ok((stacks, index))
     }
 
     /// `config_changed` and `port_mappings_changed` are separate `Notify`s —
@@ -89,6 +136,7 @@ impl ServicesToml {
     /// them race for each wake-up instead of both reliably observing it.
     pub(crate) async fn watch(
         services: &Arc<RwLock<StackMap>>,
+        match_index: &Arc<RwLock<MatchIndex>>,
         orchestrator: Orchestrator,
         config_changed: Arc<Notify>,
         port_mappings_changed: Arc<Notify>,
@@ -126,12 +174,13 @@ impl ServicesToml {
                     // ensure file changes are propagated
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     match ServicesToml::load().await {
-                        Ok(loaded_services) => {
+                        Ok((loaded_services, loaded_index)) => {
                             let conflicts = detect_port_conflicts(&loaded_services);
                             if conflicts.is_empty() {
                                 let services_mut = &mut *services.write().await;
                                 apply_config_update(services_mut, loaded_services, &orchestrator)
                                     .await;
+                                *match_index.write().await = loaded_index;
                                 config_changed.notify_one();
                                 port_mappings_changed.notify_one();
                             } else {
@@ -191,7 +240,8 @@ impl ServicesToml {
                     None,
                     ServiceProtocol::Http,
                     None,
-                    EgressPolicy::None,
+                    CountryPolicy::None,
+                    CountryPolicy::None,
                 ),
             );
         }
@@ -221,18 +271,28 @@ impl ServicesToml {
                 }
                 _ => {}
             }
-            let egress_policy = match (s.blocked_countries, s.allowed_countries) {
-                (Some(_), Some(_)) => {
-                    return Err(format!(
-                        "service '{}': 'blocked_countries' and 'allowed_countries' are mutually exclusive",
-                        s.name
-                    ))
-                    .handle_err(location!());
-                }
-                (Some(list), None) => EgressPolicy::Blocked(upper(list)),
-                (None, Some(list)) => EgressPolicy::Allowed(upper(list)),
-                (None, None) => EgressPolicy::None,
-            };
+            let egress_policy = country_policy(
+                s.egress_blocked_countries,
+                s.egress_allowed_countries,
+                "egress",
+                &s.name,
+            )?;
+            let ingress_policy = country_policy(
+                s.ingress_blocked_countries,
+                s.ingress_allowed_countries,
+                "ingress",
+                &s.name,
+            )?;
+            // Ingress policy is enforced at the proxy, which only routes reachable
+            // entry points. On a backend-only service it would be dead config, so
+            // reject it rather than silently ignore.
+            if ingress_policy != CountryPolicy::None && s.timeout.is_none() {
+                return Err(format!(
+                    "service '{}': ingress country policy requires a proxy-reachable service (set a 'timeout')",
+                    s.name
+                ))
+                .handle_err(location!());
+            }
             let triggers = s.triggers.into_iter().map(|t| (t.port, t.chain)).collect();
             ret_val.insert(
                 s.name,
@@ -244,6 +304,7 @@ impl ServicesToml {
                     protocol,
                     s.listen_port,
                     egress_policy,
+                    ingress_policy,
                 ),
             );
         }
@@ -299,25 +360,139 @@ fn upper(list: Vec<String>) -> Vec<String> {
     list.into_iter().map(|c| c.to_uppercase()).collect()
 }
 
-async fn parse_file(path: &Path) -> Result<HashMap<String, ServiceInfo>, Error> {
+/// Build a `CountryPolicy` from one direction's blocked/allowed lists. The two
+/// lists are mutually exclusive; `dir` ("ingress"/"egress") only shapes the
+/// error message so it names the offending fields.
+fn country_policy(
+    blocked: Option<Vec<String>>,
+    allowed: Option<Vec<String>>,
+    dir: &str,
+    service: &str,
+) -> Result<CountryPolicy, Error> {
+    match (blocked, allowed) {
+        (Some(_), Some(_)) => Err(format!(
+            "service '{service}': '{dir}_blocked_countries' and '{dir}_allowed_countries' are mutually exclusive"
+        ))
+        .handle_err(location!()),
+        (Some(list), None) => Ok(CountryPolicy::Blocked(upper(list))),
+        (None, Some(list)) => Ok(CountryPolicy::Allowed(upper(list))),
+        (None, None) => Ok(CountryPolicy::None),
+    }
+}
+
+/// Single source of truth for "is this stack file valid?": TOML syntax, then the
+/// host-match/port, protocol/listen_port, and country-list rules. Shared by the
+/// disk loader ([`parse_file`]) and the UI save handler ([`validate_stack_toml`]).
+/// Cross-stack port conflicts are separate — see [`detect_port_conflicts`].
+fn parse_stack_content(
+    content: &str,
+) -> Result<(HashMap<String, ServiceInfo>, Vec<MatchEntry>), Error> {
+    let parsed: ServicesToml = toml::from_str(content).handle_err(location!())?;
+    let match_entries = build_match_entries(&parsed.services)?;
+    Ok((parsed.services_map()?, match_entries))
+}
+
+/// Validate raw TOML the same way the loader does, returning the per-service map
+/// on success or a human-readable error for the UI's parse-status indicator.
+pub(crate) fn validate_stack_toml(content: &str) -> Result<HashMap<String, ServiceInfo>, String> {
+    parse_stack_content(content)
+        .map(|(services, _)| services)
+        .map_err(|e| e.to_str().to_string())
+}
+
+async fn parse_file(path: &Path) -> Result<(HashMap<String, ServiceInfo>, Vec<MatchEntry>), Error> {
     let str_repr = tokio::fs::read_to_string(path)
         .await
         .handle_err(location!())?;
-    let parsed: ServicesToml = toml::from_str(&str_repr).handle_err(location!())?;
-    parsed.services_map()
+    parse_stack_content(&str_repr)
 }
 
 /// All non-default egress policies, keyed by (stack, service) — the comparable
 /// footprint used to detect a policy change across a reload.
-fn egress_policies(services: &StackMap) -> BTreeMap<(String, String), EgressPolicy> {
+fn egress_policies(services: &StackMap) -> BTreeMap<(String, String), CountryPolicy> {
     services
         .iter()
         .flat_map(|(stack, map)| {
             map.iter()
-                .filter(|(_, si)| *si.egress_policy() != EgressPolicy::None)
+                .filter(|(_, si)| *si.egress_policy() != CountryPolicy::None)
                 .map(|(name, si)| ((stack.clone(), name.clone()), si.egress_policy().clone()))
         })
         .collect()
+}
+
+/// All non-default ingress policies, keyed by (stack, service) — the comparable
+/// footprint used to detect an ingress-policy change across a reload.
+fn ingress_policies(services: &StackMap) -> BTreeMap<(String, String), CountryPolicy> {
+    services
+        .iter()
+        .flat_map(|(stack, map)| {
+            map.iter()
+                .filter(|(_, si)| *si.ingress_policy() != CountryPolicy::None)
+                .map(|(name, si)| ((stack.clone(), name.clone()), si.ingress_policy().clone()))
+        })
+        .collect()
+}
+
+/// Tear down every active proxy session whose client country the current ingress
+/// policy denies — the same `ForceSessionTeardown` the manual teardown button
+/// uses, so the nullnet overlay is cleaned up. tcp/udp streams close when their
+/// path drops; HTTP/S is already 403'd per-request.
+///
+/// Only the services in `changed` (whose ingress policy actually differs on this
+/// reload) are re-evaluated, so an unrelated policy edit can't disturb others.
+/// Country comes from the cached geo (`geo_get`, no network I/O) — this runs
+/// under the `services` write lock, so it must not block; ingress IPs are warmed
+/// by `check_ingress`, and an unresolved one is treated per policy (allow-list
+/// unknown → deny), consistent with the door check that re-evaluates on reconnect.
+async fn teardown_ingress_denied_sessions(
+    services: &mut StackMap,
+    orchestrator: &Orchestrator,
+    changed: &HashSet<(String, String)>,
+) {
+    // Phase 1: collect (stack, service, client) the reloaded policy now denies.
+    let mut denied: Vec<(String, String, Client)> = Vec::new();
+    for (stack, stack_map) in services.iter() {
+        for (svc_name, info) in stack_map {
+            if !changed.contains(&(stack.clone(), svc_name.clone())) {
+                continue;
+            }
+            let policy = info.ingress_policy();
+            if *policy == CountryPolicy::None {
+                continue;
+            }
+            let ServiceInfo::Registered(reg) = info else {
+                continue;
+            };
+            for (client, _ci, _ip, _docker) in reg.all_clients_owned() {
+                if client.is_proxy().is_none() {
+                    continue;
+                }
+                let Ok(ip) = client.name().parse::<Ipv4Addr>() else {
+                    continue;
+                };
+                let country = orchestrator
+                    .geo_get(ip)
+                    .and_then(|g| g.country_code)
+                    .map(|c| c.to_uppercase());
+                if !policy.allows(country.as_deref()) {
+                    denied.push((stack.clone(), svc_name.clone(), client));
+                }
+            }
+        }
+    }
+    // Phase 2: tear each down through the shared teardown path.
+    for (stack, name, client) in denied {
+        if let Some(stack_map) = services.get_mut(&stack) {
+            apply_changes(
+                vec![ServiceChange::ForceSessionTeardown { name, client }],
+                stack_map,
+                None,
+                orchestrator,
+                &stack,
+            )
+            .await;
+        }
+    }
 }
 
 pub(crate) async fn apply_config_update(
@@ -327,6 +502,8 @@ pub(crate) async fn apply_config_update(
 ) {
     let policies_before = egress_policies(services);
     let policies_after = egress_policies(&loaded_services);
+    let ingress_before = ingress_policies(services);
+    let ingress_after = ingress_policies(&loaded_services);
     // Stacks that disappeared from config: tear down everything in them.
     let removed_stacks: Vec<String> = services
         .keys()
@@ -375,11 +552,34 @@ pub(crate) async fn apply_config_update(
     if policies_before != policies_after {
         orchestrator.broadcast_egress_policy_changed().await;
     }
+
+    // Services whose ingress policy actually changed (added or altered — a removed
+    // policy is now None and denies nothing, so it needs no teardown). Only these
+    // are re-evaluated, so editing one service's policy can't disturb others.
+    let changed_ingress: HashSet<(String, String)> = ingress_after
+        .iter()
+        .filter(|(k, v)| ingress_before.get(*k) != Some(*v))
+        .map(|(k, _)| k.clone())
+        .collect();
+    if !changed_ingress.is_empty() {
+        teardown_ingress_denied_sessions(services, orchestrator, &changed_ingress).await;
+    }
 }
 
 #[derive(Deserialize)]
 struct ServiceToml {
     name: String,
+    /// Host-match key for a Docker service: the Swarm service label
+    /// (`com.docker.swarm.service.name`) or, in standalone mode, the container
+    /// name. A running container whose label equals this registers a replica.
+    docker_container: Option<String>,
+    /// Host-match key for a non-Docker service: the listening process's exe path
+    /// (`/proc/<pid>/exe`). A listener with this path registers a replica.
+    process_path: Option<String>,
+    /// Backend port the overlay/proxy connects to on this service's replicas.
+    /// Required when any host-match key is set. Distinct from `listen_port`
+    /// (the proxy's external tcp/udp front port).
+    port: Option<u16>,
     /// Proxy-reachability for this service. Present → reachable entry point
     /// with this per-client timeout in seconds (0 disables the timeout).
     /// Omitted → not proxy-reachable (backend-only); the service is still
@@ -406,11 +606,15 @@ struct ServiceToml {
     /// External port the proxy listens on for this service. Required (and
     /// only meaningful) when `protocol` is `tcp` or `udp`.
     listen_port: Option<u16>,
-    /// Egress country policy (ISO alpha-2 codes), mutually exclusive:
-    /// `blocked_countries` denies the listed countries (unknown → allow);
-    /// `allowed_countries` permits only the listed ones (unknown → deny).
-    blocked_countries: Option<Vec<String>>,
-    allowed_countries: Option<Vec<String>>,
+    /// Country policies (ISO alpha-2 codes). Within each direction the blocked/
+    /// allowed lists are mutually exclusive: `*_blocked_countries` denies the
+    /// listed countries (unknown → allow); `*_allowed_countries` permits only the
+    /// listed ones (unknown → deny). Egress = destination country of the service's
+    /// outbound traffic; ingress = source country of proxy clients reaching it.
+    egress_blocked_countries: Option<Vec<String>>,
+    egress_allowed_countries: Option<Vec<String>>,
+    ingress_blocked_countries: Option<Vec<String>>,
+    ingress_allowed_countries: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -556,7 +760,7 @@ timeout = 30
             .await
             .unwrap();
 
-        let stacks = ServicesToml::load_from_dir(dir.to_str().unwrap())
+        let (stacks, _index) = ServicesToml::load_from_dir(dir.to_str().unwrap())
             .await
             .expect("load");
 
@@ -644,7 +848,8 @@ listen_port = 6379
                 None,
                 ServiceProtocol::Tcp,
                 Some(6379),
-                EgressPolicy::None,
+                CountryPolicy::None,
+                CountryPolicy::None,
             ),
         );
         let mut bravo = HashMap::new();
@@ -657,7 +862,8 @@ listen_port = 6379
                 None,
                 ServiceProtocol::Tcp,
                 Some(6379),
-                EgressPolicy::None,
+                CountryPolicy::None,
+                CountryPolicy::None,
             ),
         );
         let stacks: StackMap =
@@ -681,7 +887,8 @@ listen_port = 6379
                 None,
                 ServiceProtocol::Tcp,
                 Some(53),
-                EgressPolicy::None,
+                CountryPolicy::None,
+                CountryPolicy::None,
             ),
         );
         alpha.insert(
@@ -693,7 +900,8 @@ listen_port = 6379
                 None,
                 ServiceProtocol::Udp,
                 Some(53),
-                EgressPolicy::None,
+                CountryPolicy::None,
+                CountryPolicy::None,
             ),
         );
         let stacks: StackMap = HashMap::from([("alpha".to_string(), alpha)]);

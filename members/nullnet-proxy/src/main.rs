@@ -38,6 +38,26 @@ impl ProxyHttp for NullnetProxy {
     fn new_ctx(&self) -> Self::CTX {}
 
     async fn request_filter(&self, session: &mut Session, _ctx: &mut ()) -> Result<bool> {
+        // Ingress country policy (both HTTP and HTTPS listeners), enforced before
+        // we touch the backend. Best-effort: if host or client IP can't be read
+        // we let upstream_peer handle it; only an explicit server deny 403s, and a
+        // check RPC error is logged and allowed through (upstream lookup will fail
+        // anyway if the control plane is down).
+        if let (Some(service), Some(client_ip)) =
+            (ingress_host(session), ingress_client_ip(session))
+        {
+            match self.server.check_ingress(service.clone(), client_ip).await {
+                Ok(false) => {
+                    let mut resp = ResponseHeader::build(403, None)?;
+                    resp.insert_header("content-length", "0")?;
+                    session.write_response_header(Box::new(resp), true).await?;
+                    return Ok(true);
+                }
+                Ok(true) => {}
+                Err(e) => eprintln!("[ingress] policy check failed for '{service}': {e}"),
+            }
+        }
+
         // only the HTTP listener redirects, and only for hosts we can serve over TLS
         if self.tls {
             return Ok(false);
@@ -220,6 +240,24 @@ impl ProxyHttp for NullnetProxy {
 
         Ok(Box::new(HttpPeer::new(upstream, false, String::new())))
     }
+}
+
+/// The requested service name (Host header, or HTTP/2 `:authority` via the URI),
+/// with any port stripped. `None` if neither carries a host.
+fn ingress_host(session: &Session) -> Option<String> {
+    let req = session.req_header();
+    let raw = req
+        .headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| req.uri.host().map(str::to_string))?;
+    Some(raw.split(':').next().unwrap_or(&raw).to_string())
+}
+
+/// The external client's source IP as a string, if it is an inet address.
+fn ingress_client_ip(session: &Session) -> Option<String> {
+    session.client_addr()?.as_inet().map(|a| a.ip().to_string())
 }
 
 #[tokio::main]

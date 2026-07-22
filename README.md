@@ -40,6 +40,10 @@ The repository should be cloned under `/root` so the provided `setup-*.sh` scrip
   CERT_ENCRYPTION_KEY=<32 raw bytes or 64 hex chars>
   PROXY_IP=192.168.1.100
   ENCRYPTION_ENABLED=true
+  INGRESS_ALLOW_TCP_PORTS=22,8080   # inbound TCP listeners every node accepts
+  INGRESS_ALLOW_UDP_PORTS=          # inbound UDP listeners (e.g. Swarm gossip 7946)
+  EGRESS_ALLOW_TCP_PORTS=           # outbound TCP dsts (e.g. 80,443 for updates)
+  EGRESS_ALLOW_UDP_PORTS=53,123     # outbound UDP dsts (DNS, NTP)
   ```
   `CERT_ENCRYPTION_KEY` is **required** — the server refuses to start without it. It encrypts
   TLS certificate private keys (and the DNS-provider credentials of ACME-issued certs) at rest;
@@ -55,6 +59,15 @@ The repository should be cloned under `/root` so the provided `setup-*.sh` scrip
   for VXLAN) and **defaults to `true`** — omit it to keep encryption on. Set it to `false`/`0`/`no`
   to run tunnels unencrypted instead (a bare vxlan/veth link, no XFRM SA/policy or MACsec).
 
+  The four `{INGRESS,EGRESS}_ALLOW_{TCP,UDP}_PORTS` lists are the **global** host-NIC firewall
+  allowlist — decided here once (single point of decision) and delivered to every node in its
+  `NetworkType` response at startup. They apply uniformly to all clients (matched on destination
+  port). **Put `22` in `INGRESS_ALLOW_TCP_PORTS`** or every strict node loses SSH the moment its
+  client starts. A node that needs name resolution / time sync needs `EGRESS_ALLOW_UDP_PORTS=53,123`;
+  DHCP renewal needs `67` (and inbound `68` for broadcast replies). The gateway node (the one whose
+  IP equals `PROXY_IP`) is switched to gateway posture automatically — all outbound allowed and
+  tracked — so no per-node flag is needed; inbound there still obeys these lists, so include `80,443`.
+
 - TLS certificates are issued from Let's Encrypt via a DNS-01 challenge (UI: *Certificates* page).
   Each cert stores its DNS-provider credentials encrypted at rest and is **renewed automatically**
   before expiry. The renewal scan is tunable via optional env vars (defaults shown):
@@ -68,20 +81,58 @@ The repository should be cloned under `/root` so the provided `setup-*.sh` scrip
   `members/nullnet-server/services/`. The filename (minus `.toml`) is the stack name.
   For example, to define a stack called `my-app`, create `services/my-app.toml`:
   ```
-  [[services]]
+  [[services]]                 # http entry point, backed by a Docker container
   name = "color.com"
   timeout = 0
+  docker_container = "my-app_color"
+  port = 3001
   proxy_dependencies = [["fs.color.com"]]
 
   [[services.triggers]]
   port = 5555
   chain = ["ts.color.com"]
 
-  [[services]]
+  [[services]]                 # backend-only dep of color.com
   name = "fs.color.com"
-  ...
+  docker_container = "my-app_fs"
+  port = 8080
+
+  [[services]]                 # backend trigger target — port matches the trigger (5555)
+  name = "ts.color.com"
+  docker_container = "my-app_ts"
+  port = 5555
+
+  [[services]]                 # host (non-Docker) service, matched by process
+  name = "metrics.com"
+  timeout = 0
+  process_path = "/usr/local/bin/metrics-exporter"
+  port = 9090
+
+  [[services]]                 # raw tcp — proxy binds listen_port and forwards
+  name = "redis.internal"
+  timeout = 0
+  docker_container = "my-app_redis"
+  port = 6379
+  protocol = "tcp"
+  listen_port = 6379
+
+  [[services]]                 # country policies (egress + ingress)
+  name = "api.internal"
+  timeout = 0
+  docker_container = "my-app_api"
+  port = 8000
+  egress_blocked_countries = ["RU", "CN"]
+  ingress_allowed_countries = ["US", "IT"]
   ```
 
+- a service is **hostable** when it declares a match key plus a `port` (the backend port replicas
+  are reached on). Clients hold no service file: each reports its raw local observations and the
+  server matches them against these keys. A container/process may match several services across
+  stacks; every match registers a replica:
+  - `docker_container` — the Swarm service label (`com.docker.swarm.service.name`) or, standalone,
+    the container name; matched against a running container
+  - `process_path` — a listening process's exe path (`/proc/<pid>/exe`); matched against a host
+    (non-Docker) service
 - `timeout` controls proxy-reachability: when present the service is a proxy-reachable entry point
   with that per-client idle timeout in seconds (`0` disables the timeout); omit it to keep the
   service off the proxy (backend-only)
@@ -97,35 +148,22 @@ The repository should be cloned under `/root` so the provided `setup-*.sh` scrip
   `Host` header on the shared 80/443 listeners) or `tcp`/`udp`, which each require `listen_port` —
   the external port nullnet-proxy binds directly and forwards raw traffic from. `listen_port` must
   be globally unique per protocol across every stack (the server refuses to start, or rejects a
-  hot-reload, if two services claim the same `protocol`/`listen_port` pair):
-  ```
-  [[services]]
-  name = "redis.internal"
-  timeout = 0
-  protocol = "tcp"
-  listen_port = 6379
-
-  [[services]]
-  name = "dns.internal"
-  timeout = 0
-  protocol = "udp"
-  listen_port = 53
-  ```
-
-- `blocked_countries` / `allowed_countries` restrict where a service may reach on the internet, by
-  ISO alpha-2 country code (the destination IP is geo-resolved server-side). `blocked_countries`
-  denies the listed countries and allows everything else (including IPs with unknown geo);
-  `allowed_countries` permits only the listed countries and denies everything else (unknown geo
-  included). The two are mutually exclusive — setting both is a hard config error. Enforcement is at
-  the initiator's nullnet-client: the first packet of each new external flow is held and verdicted,
-  denied destinations show a `BLOCKED` chip in the topology UI, and editing the policy at runtime
-  tears down already-established flows that the new policy forbids:
-  ```
-  [[services]]
-  name = "api.internal"
-  timeout = 0
-  blocked_countries = ["RU", "CN"]
-  ```
+  hot-reload, if two services claim the same `protocol`/`listen_port` pair)
+- country policies restrict traffic by ISO alpha-2 country code (the peer IP is geo-resolved
+  server-side, from one shared geo cache). `*_blocked_countries` denies the listed countries and
+  allows everything else (including IPs with unknown geo); `*_allowed_countries` permits only the
+  listed countries and denies everything else (unknown geo included). Within each direction the two
+  are mutually exclusive — setting both is a hard config error. Two directions:
+  - **egress** (`egress_blocked_countries` / `egress_allowed_countries`) — where a service may reach
+    on the internet (destination country). Enforced at the initiator's nullnet-client: the first
+    packet of each new external flow is held and verdicted, denied destinations show a `BLOCKED` chip
+    in the topology UI, and editing the policy at runtime tears down already-established flows the new
+    policy forbids.
+  - **ingress** (`ingress_blocked_countries` / `ingress_allowed_countries`) — which external clients
+    may reach a **proxy-reachable** service (client source country). Enforced server-side at the
+    nullnet-proxy chokepoint: HTTP denials get a `403`, raw tcp/udp denials close the connection.
+    Only valid on a service with a `timeout` (an entry point) — the server rejects an ingress policy
+    on a backend-only service.
 
 - run the project as a daemon (from the repo root)
   ```
@@ -167,42 +205,16 @@ The repository should be cloned under `/root` so the provided `setup-*.sh` scrip
   ```
   CONTROL_SERVICE_ADDR=192.168.1.100
   CONTROL_SERVICE_PORT=50051
-  INGRESS_ALLOW_TCP_PORTS=22,8080   # inbound TCP listeners
-  INGRESS_ALLOW_UDP_PORTS=          # inbound UDP listeners (e.g. Swarm gossip 7946)
-  EGRESS_ALLOW_TCP_PORTS=           # outbound TCP dsts (e.g. 80,443 for updates)
-  EGRESS_ALLOW_UDP_PORTS=53,123     # outbound UDP dsts (DNS, NTP)
-  EGRESS_GATEWAY=true               # only on the host that runs nullnet-proxy
   ```
 
   > **⚠️ The client attaches a default-deny eBPF firewall to the uplink NIC on startup.** It permits
   > only the nullnet control plane (gRPC to the server), data plane (VXLAN to peers), established
-  > returns, ICMP (always, both directions — echo + PMTUD), and whatever you list in the four
-  > `{INGRESS,EGRESS}_ALLOW_{TCP,UDP}_PORTS` variables (matched on destination port). **Put `22` in
-  > `INGRESS_ALLOW_TCP_PORTS`** or you will lose SSH the moment the client starts — enabling it over an
-  > SSH session with `22` missing kills the session. A host that needs name resolution / time sync needs
-  > `EGRESS_ALLOW_UDP_PORTS=53,123`; DHCP renewal needs `67` (and inbound `68` for broadcast replies).
-
-  `EGRESS_GATEWAY=true` is set **only on the gateway host** (the one running `nullnet-proxy`). It
-  switches that node's firewall to gateway posture — all outbound is allowed (and tracked) and it
-  forwards brokered egress to the internet; inbound still obeys the allowlist, so list `80,443`
-  (and `22`) in `INGRESS_ALLOW_TCP_PORTS` there. Every other (strict) node obeys the allowlist in
-  both directions.
-
-- service configuration must be stored at `members/nullnet-client/services.toml`. Each entry
-  must declare its `stack` (which must match a `services/<stack>.toml` on the server, otherwise
-  the declaration is dropped):
-  ```
-  # services = [] # use this if you don't want to declare any service
-
-  [[services]]
-  name = "color.com"
-  port = 3001
-  docker_container = "stack-name_container-name" # should correspond to the label "com.docker.swarm.service.name"
-  stack = "my-app"
-
-  [[services]]
-  ...
-  ```
+  > returns, ICMP (always, both directions — echo + PMTUD), and the port allowlist. That allowlist is
+  > **no longer set here** — it is decided globally on `nullnet-server` (the four
+  > `{INGRESS,EGRESS}_ALLOW_{TCP,UDP}_PORTS` variables) and delivered to the client in its
+  > `NetworkType` response at startup, so there is a single point of decision. Make sure `22` is in the
+  > server's `INGRESS_ALLOW_TCP_PORTS` before starting a client over SSH, or the session dies. The
+  > gateway-vs-strict posture is likewise derived server-side from `PROXY_IP` — no per-client flag.
 
 - run the project as a daemon (from the repo root)
   ```

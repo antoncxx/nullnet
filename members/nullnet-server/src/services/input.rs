@@ -1,12 +1,14 @@
 use crate::events::Event as ServerEvent;
 use crate::orchestrator::Orchestrator;
-use crate::services::changes::{apply_changes, detect_config_changes};
+use crate::services::changes::{ServiceChange, apply_changes, detect_config_changes};
+use crate::services::clients::Client;
 use crate::services::service_info::{CountryPolicy, ServiceInfo};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use nullnet_grpc_lib::nullnet_grpc::ServiceProtocol;
 use nullnet_liberror::{Error, ErrorHandler, Location, location};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
+use std::net::Ipv4Addr;
 use std::ops::Sub;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -414,6 +416,65 @@ fn egress_policies(services: &StackMap) -> BTreeMap<(String, String), CountryPol
         .collect()
 }
 
+/// All non-default ingress policies, keyed by (stack, service) — the comparable
+/// footprint used to detect an ingress-policy change across a reload.
+fn ingress_policies(services: &StackMap) -> BTreeMap<(String, String), CountryPolicy> {
+    services
+        .iter()
+        .flat_map(|(stack, map)| {
+            map.iter()
+                .filter(|(_, si)| *si.ingress_policy() != CountryPolicy::None)
+                .map(|(name, si)| ((stack.clone(), name.clone()), si.ingress_policy().clone()))
+        })
+        .collect()
+}
+
+/// Tear down every active proxy session whose client country the current ingress
+/// policy denies — the same `ForceSessionTeardown` the manual teardown button
+/// uses, so the nullnet overlay is cleaned up. tcp/udp streams close when their
+/// path drops; HTTP/S is already 403'd per-request. Called only when the ingress
+/// footprint changed on reload.
+async fn teardown_ingress_denied_sessions(services: &mut StackMap, orchestrator: &Orchestrator) {
+    // Phase 1: collect (stack, service, client) the reloaded policy now denies.
+    let mut denied: Vec<(String, String, Client)> = Vec::new();
+    for (stack, stack_map) in services.iter() {
+        for (svc_name, info) in stack_map {
+            let policy = info.ingress_policy();
+            if *policy == CountryPolicy::None {
+                continue;
+            }
+            let ServiceInfo::Registered(reg) = info else {
+                continue;
+            };
+            for (client, _ci, _ip, _docker) in reg.all_clients_owned() {
+                if client.is_proxy().is_none() {
+                    continue;
+                }
+                let Ok(ip) = client.name().parse::<Ipv4Addr>() else {
+                    continue;
+                };
+                let country = orchestrator.destination_country(ip).await;
+                if !policy.allows(country.as_deref()) {
+                    denied.push((stack.clone(), svc_name.clone(), client));
+                }
+            }
+        }
+    }
+    // Phase 2: tear each down through the shared teardown path.
+    for (stack, name, client) in denied {
+        if let Some(stack_map) = services.get_mut(&stack) {
+            apply_changes(
+                vec![ServiceChange::ForceSessionTeardown { name, client }],
+                stack_map,
+                None,
+                orchestrator,
+                &stack,
+            )
+            .await;
+        }
+    }
+}
+
 pub(crate) async fn apply_config_update(
     services: &mut StackMap,
     loaded_services: StackMap,
@@ -421,6 +482,8 @@ pub(crate) async fn apply_config_update(
 ) {
     let policies_before = egress_policies(services);
     let policies_after = egress_policies(&loaded_services);
+    let ingress_before = ingress_policies(services);
+    let ingress_after = ingress_policies(&loaded_services);
     // Stacks that disappeared from config: tear down everything in them.
     let removed_stacks: Vec<String> = services
         .keys()
@@ -468,6 +531,12 @@ pub(crate) async fn apply_config_update(
     // flows (they flush verdict caches + conntrack; denied flows die).
     if policies_before != policies_after {
         orchestrator.broadcast_egress_policy_changed().await;
+    }
+
+    // Any ingress country-policy difference → tear down active proxy sessions the
+    // new policy now denies (overlay cleaned up, tcp/udp streams closed).
+    if ingress_before != ingress_after {
+        teardown_ingress_denied_sessions(services, orchestrator).await;
     }
 }
 

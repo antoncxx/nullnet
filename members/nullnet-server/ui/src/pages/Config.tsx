@@ -9,13 +9,31 @@ type Status =
   | { kind: 'ok' }
   | { kind: 'error'; msg: string };
 
-const STARTER_TEMPLATE = `# New stack — define one [[services]] block per service.
+const STARTER_TEMPLATE = `# Stack configuration — one [[services]] block per service.
+# This example is a proxy-reachable Docker service; uncomment the
+# optional fields below as needed.
 [[services]]
-name = "example"
-docker_container = "example"
-port = 8080
-timeout = 60
+name = "example"              # service identifier (unique within the stack)
+docker_container = "example"  # host-match key: Swarm service / container name
+port = 8080                   # backend port on the service's replicas
+timeout = 60                  # proxy-reachable entry point; idle timeout seconds (0 = none)
+
+# --- optional ---
+# process_path = "/usr/bin/example"      # non-Docker match key (use instead of docker_container)
+# max_networks = 2                       # cap proxy networks; extra clients reuse one
+# proxy_dependencies = [["db.example"]]  # dep chains brought up on proxy setup
+# protocol = "tcp"                       # "http" (default) | "tcp" | "udp"
+# listen_port = 5432                     # external proxy port; required for tcp/udp
+# blocked_countries = ["RU", "CN"]       # egress deny-list (exclusive with allowed_countries)
+# allowed_countries = ["US", "IT"]       # egress allow-list
+
+# [[services.triggers]]                  # backend-triggered chain: observed port -> chain
+# port = 5555
+# chain = ["worker.example"]
 `;
+
+// A stack name maps to a bare filename, so keep it to safe identifier chars.
+const validName = (n: string) => /^[A-Za-z0-9_-]+$/.test(n);
 
 export default function Config() {
   const { stack, setStack } = useStack();
@@ -25,6 +43,7 @@ export default function Config() {
   const [content, setContent] = useState<string>('');
   const [original, setOriginal] = useState<string>('');
   const [status, setStatus] = useState<Status>({ kind: 'idle' });
+  const [newName, setNewName] = useState<string>('');
 
   // Sync the editor when the loaded file (or stack) changes.
   useEffect(() => {
@@ -35,12 +54,13 @@ export default function Config() {
     }
   }, [text]);
 
-  const notFound = !loading && !!error && error.includes('404');
+  const noStack = !stack.trim();
+  const notFound = !noStack && !loading && !!error && error.includes('404');
   const dirty = content !== original;
 
-  async function postConfig(body: string): Promise<{ ok: boolean; error?: string }> {
+  async function postConfig(name: string, body: string): Promise<{ ok: boolean; error?: string }> {
     try {
-      const res = await fetch(`/api/config/${stack}`, {
+      const res = await fetch(`/api/config/${name}`, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain' },
         body,
@@ -54,7 +74,7 @@ export default function Config() {
 
   async function save() {
     setStatus({ kind: 'saving' });
-    const r = await postConfig(content);
+    const r = await postConfig(stack, content);
     if (r.ok) {
       setOriginal(content);
       setStatus({ kind: 'ok' });
@@ -63,15 +83,15 @@ export default function Config() {
     }
   }
 
-  async function createStack() {
+  async function createStack(name: string) {
     setStatus({ kind: 'saving' });
-    const r = await postConfig(STARTER_TEMPLATE);
+    const r = await postConfig(name, STARTER_TEMPLATE);
     if (r.ok) {
-      setContent(STARTER_TEMPLATE);
-      setOriginal(STARTER_TEMPLATE);
-      setStatus({ kind: 'ok' });
-      refetch();
+      setStatus({ kind: 'idle' });
+      setNewName('');
       refetchStacks();
+      if (name === stack) refetch();
+      else setStack(name);
     } else {
       setStatus({ kind: 'error', msg: r.error ?? 'unknown error' });
     }
@@ -90,42 +110,69 @@ export default function Config() {
     }
   }
 
+  const errorLine = status.kind === 'error' && (
+    <span className="cfg-err">
+      <span className="badge b-red">Error</span>
+      <span className="cfg-err-msg">{status.msg}</span>
+    </span>
+  );
+
   return (
     <Layout page="config">
       <div className="content">
         <div className="page-title">Configuration</div>
         <div className="page-sub">
-          Live service configuration for stack{' '}
-          <span style={{ fontFamily: "'JetBrains Mono',monospace", color: 'var(--t1)' }}>{stack}</span>
-          {' '}— edits are validated and applied without a restart.
+          {noStack
+            ? 'No stacks configured yet.'
+            : <>Live service configuration for stack{' '}
+                <span style={{ fontFamily: "'JetBrains Mono',monospace", color: 'var(--t1)' }}>{stack}</span>
+                {' '}— edits are validated and applied without a restart.</>}
         </div>
 
-        {loading && <div style={{ color: 'var(--t2)', fontSize: 12 }}>Loading…</div>}
+        {noStack && (
+          <div className="cfg-empty">
+            <div style={{ color: 'var(--t2)', fontSize: 13 }}>Name a stack to create it:</div>
+            <input
+              className="cfg-name"
+              value={newName}
+              placeholder="my-stack"
+              spellCheck={false}
+              autoFocus
+              onChange={e => setNewName(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && validName(newName)) createStack(newName); }}
+            />
+            <button
+              className="save-btn"
+              onClick={() => createStack(newName)}
+              disabled={!validName(newName) || status.kind === 'saving'}
+            >
+              {status.kind === 'saving' ? 'Creating…' : 'Create stack'}
+            </button>
+            {errorLine}
+          </div>
+        )}
+
+        {!noStack && loading && <div style={{ color: 'var(--t2)', fontSize: 12 }}>Loading…</div>}
 
         {notFound && (
           <div className="cfg-empty">
             <div style={{ color: 'var(--t2)', fontSize: 13 }}>
               Stack <span style={{ fontFamily: "'JetBrains Mono',monospace", color: 'var(--t1)' }}>{stack}</span> doesn't exist yet.
             </div>
-            <button className="save-btn" onClick={createStack} disabled={status.kind === 'saving'}>
+            <button className="save-btn" onClick={() => createStack(stack)} disabled={status.kind === 'saving'}>
               {status.kind === 'saving' ? 'Creating…' : 'Create stack'}
             </button>
-            {status.kind === 'error' && (
-              <span className="cfg-err">
-                <span className="badge b-red">Error</span>
-                <span className="cfg-err-msg">{status.msg}</span>
-              </span>
-            )}
+            {errorLine}
           </div>
         )}
 
-        {error && !notFound && (
+        {!noStack && error && !notFound && (
           <div style={{ color: 'var(--red)', fontSize: 12 }}>
             Failed to load config: {error}
           </div>
         )}
 
-        {!loading && !error && (
+        {!noStack && !loading && !error && (
           <>
             <textarea
               className="cfg-edit"

@@ -39,6 +39,9 @@ export interface SessionJson {
   service: string;
   chain_depth: number;
   created_at: number;
+  country_code?: string;
+  asn?: string;
+  org?: string;
 }
 
 export interface CertJson {

@@ -3,6 +3,7 @@ import Layout from '../components/Layout';
 import { useApi } from '../hooks/useApi';
 import { useStack } from '../StackContext';
 import type { SessionJson } from '../types';
+import { flagEmoji, countryName } from '../geo';
 
 export default function Sessions() {
   const { stack } = useStack();
@@ -69,7 +70,13 @@ export default function Sessions() {
                     </span>
                   </td>
                   <td style={{ fontWeight: 500 }}>{s.service}</td>
-                  <td style={{ fontFamily: "'JetBrains Mono',monospace", color: 'var(--t1)' }}>{s.client_ip}</td>
+                  <td style={{ fontFamily: "'JetBrains Mono',monospace", color: 'var(--t1)' }}>
+                    {flagEmoji(s.country_code) && (
+                      <span title={countryName(s.country_code)} style={{ marginRight: 5, cursor: 'default' }}>{flagEmoji(s.country_code)}</span>
+                    )}
+                    {s.client_ip}
+                    {s.org && <div style={{ fontSize: 9, color: 'var(--t2)' }}>{s.org}</div>}
+                  </td>
                   <td style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 11, color: 'var(--cyan)' }}>{s.client_net}</td>
                   <td style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 11, color: 'var(--cyan)' }}>{s.server_net}</td>
                   <td style={{ fontFamily: "'JetBrains Mono',monospace", color: s.chain_depth > 1 ? 'var(--amber)' : 'var(--t1)' }}>

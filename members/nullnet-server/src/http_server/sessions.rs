@@ -5,6 +5,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::Serialize;
+use std::net::Ipv4Addr;
 use std::time::UNIX_EPOCH;
 
 #[derive(Serialize)]
@@ -17,6 +18,13 @@ struct SessionJson {
     service: String,
     chain_depth: usize,
     created_at: u64,
+    // Geo/ASN of the external client IP (flag + ASN in the UI), like egress.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    country_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    asn: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    org: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -40,10 +48,20 @@ pub(super) async fn list_handler(
                     .into_iter()
                     .filter_map(|(c, ci, _, _)| {
                         c.is_proxy()?;
+                        let client_ip = c.name().to_string();
+                        // Enrich + read the client IP's geo (cached, once-per-IP).
+                        let geo = client_ip
+                            .parse::<Ipv4Addr>()
+                            .ok()
+                            .and_then(|ip| {
+                                state.orchestrator.ensure_geo(ip);
+                                state.orchestrator.geo_get(ip)
+                            })
+                            .unwrap_or_default();
                         Some(SessionJson {
                             id: ci.net_id(),
                             network_id: ci.net_id(),
-                            client_ip: c.name().to_string(),
+                            client_ip,
                             client_net: ci.client_net().to_string(),
                             server_net: ci.server_net().to_string(),
                             service: name.clone(),
@@ -53,6 +71,9 @@ pub(super) async fn list_handler(
                                 .duration_since(UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_secs(),
+                            country_code: geo.country_code,
+                            asn: geo.asn,
+                            org: geo.org,
                         })
                     })
                     .collect::<Vec<_>>()

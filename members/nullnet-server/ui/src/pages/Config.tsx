@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import Layout from '../components/Layout';
-import { useApiText } from '../hooks/useApi';
+import { useApi, useApiText } from '../hooks/useApi';
 import { useStack } from '../StackContext';
 
 type Status =
@@ -9,9 +9,18 @@ type Status =
   | { kind: 'ok' }
   | { kind: 'error'; msg: string };
 
+const STARTER_TEMPLATE = `# New stack — define one [[services]] block per service.
+[[services]]
+name = "example"
+docker_container = "example"
+port = 8080
+timeout = 60
+`;
+
 export default function Config() {
-  const { stack } = useStack();
-  const { text, loading, error } = useApiText(`/api/config/${stack}`);
+  const { stack, setStack } = useStack();
+  const { text, loading, error, refetch } = useApiText(`/api/config/${stack}`);
+  const { data: stacks, refetch: refetchStacks } = useApi<string[]>('/api/stacks', 10000);
 
   const [content, setContent] = useState<string>('');
   const [original, setOriginal] = useState<string>('');
@@ -26,25 +35,58 @@ export default function Config() {
     }
   }, [text]);
 
+  const notFound = !loading && !!error && error.includes('404');
   const dirty = content !== original;
 
-  async function save() {
-    setStatus({ kind: 'saving' });
+  async function postConfig(body: string): Promise<{ ok: boolean; error?: string }> {
     try {
       const res = await fetch(`/api/config/${stack}`, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain' },
-        body: content,
+        body,
       });
       const data = await res.json().catch(() => ({ ok: res.ok, error: `HTTP ${res.status}` }));
-      if (res.ok && data.ok) {
-        setOriginal(content);
-        setStatus({ kind: 'ok' });
-      } else {
-        setStatus({ kind: 'error', msg: data.error ?? `HTTP ${res.status}` });
-      }
+      return { ok: res.ok && data.ok, error: data.error };
     } catch (e) {
-      setStatus({ kind: 'error', msg: String(e) });
+      return { ok: false, error: String(e) };
+    }
+  }
+
+  async function save() {
+    setStatus({ kind: 'saving' });
+    const r = await postConfig(content);
+    if (r.ok) {
+      setOriginal(content);
+      setStatus({ kind: 'ok' });
+    } else {
+      setStatus({ kind: 'error', msg: r.error ?? 'unknown error' });
+    }
+  }
+
+  async function createStack() {
+    setStatus({ kind: 'saving' });
+    const r = await postConfig(STARTER_TEMPLATE);
+    if (r.ok) {
+      setContent(STARTER_TEMPLATE);
+      setOriginal(STARTER_TEMPLATE);
+      setStatus({ kind: 'ok' });
+      refetch();
+      refetchStacks();
+    } else {
+      setStatus({ kind: 'error', msg: r.error ?? 'unknown error' });
+    }
+  }
+
+  async function removeStack() {
+    if (!confirm(`Delete stack "${stack}"? Its services are torn down immediately.`)) return;
+    const res = await fetch(`/api/config/${stack}`, { method: 'DELETE' });
+    if (res.ok) {
+      const others = (stacks ?? []).filter(s => s !== stack);
+      refetchStacks();
+      setStack(others[0] ?? '');
+    } else {
+      const data = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+      setStatus({ kind: 'error', msg: data.error ?? `HTTP ${res.status}` });
     }
   }
 
@@ -60,7 +102,24 @@ export default function Config() {
 
         {loading && <div style={{ color: 'var(--t2)', fontSize: 12 }}>Loading…</div>}
 
-        {error && (
+        {notFound && (
+          <div className="cfg-empty">
+            <div style={{ color: 'var(--t2)', fontSize: 13 }}>
+              Stack <span style={{ fontFamily: "'JetBrains Mono',monospace", color: 'var(--t1)' }}>{stack}</span> doesn't exist yet.
+            </div>
+            <button className="save-btn" onClick={createStack} disabled={status.kind === 'saving'}>
+              {status.kind === 'saving' ? 'Creating…' : 'Create stack'}
+            </button>
+            {status.kind === 'error' && (
+              <span className="cfg-err">
+                <span className="badge b-red">Error</span>
+                <span className="cfg-err-msg">{status.msg}</span>
+              </span>
+            )}
+          </div>
+        )}
+
+        {error && !notFound && (
           <div style={{ color: 'var(--red)', fontSize: 12 }}>
             Failed to load config: {error}
           </div>
@@ -84,6 +143,9 @@ export default function Config() {
                 disabled={!dirty || status.kind === 'saving'}
               >
                 {status.kind === 'saving' ? 'Applying…' : 'Save & apply'}
+              </button>
+              <button className="teardown-btn" onClick={removeStack}>
+                Delete stack
               </button>
 
               {status.kind === 'ok' && (

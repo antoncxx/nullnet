@@ -278,6 +278,7 @@ body {
 .save-btn:disabled { opacity: .4; cursor: default; }
 .cfg-err { display: inline-flex; align-items: center; gap: 8px; }
 .cfg-err-msg { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--red); }
+.cfg-empty { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 24px; background: rgba(0,0,0,.3); border: 1px dashed var(--gb); border-radius: 12px; }
 
 /* ── Animations ── */
 @keyframes gp { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }

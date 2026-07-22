@@ -30,7 +30,7 @@ export function useApi<T>(url: string, refreshMs?: number): ApiState<T> & { refe
   return { ...state, refetch: load };
 }
 
-export function useApiText(url: string, refreshMs?: number): { text: string | null; loading: boolean; error: string | null } {
+export function useApiText(url: string, refreshMs?: number): { text: string | null; loading: boolean; error: string | null; refetch: () => void } {
   const [state, setState] = useState<{ text: string | null; loading: boolean; error: string | null }>({ text: null, loading: true, error: null });
 
   const load = useCallback(async () => {
@@ -51,5 +51,5 @@ export function useApiText(url: string, refreshMs?: number): { text: string | nu
     return () => clearInterval(id);
   }, [load, refreshMs]);
 
-  return state;
+  return { ...state, refetch: load };
 }

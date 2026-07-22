@@ -107,3 +107,27 @@ pub(super) async fn save_handler(
     })
     .into_response()
 }
+
+/// DELETE a stack's config file. The `./services` watcher sees the removal and
+/// tears the stack's services down (`apply_config_update`). Creating a stack is
+/// just a `save_handler` POST to a name that has no file yet.
+pub(super) async fn delete_handler(Path(stack): Path<String>) -> Response {
+    if !valid_stack_name(&stack) {
+        return rejected(StatusCode::BAD_REQUEST, "invalid stack name");
+    }
+    let path = format!("./services/{stack}.toml");
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => axum::Json(SaveResult {
+            ok: true,
+            error: None,
+        })
+        .into_response(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            rejected(StatusCode::NOT_FOUND, "stack not found")
+        }
+        Err(_) => rejected(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to delete configuration file",
+        ),
+    }
+}

@@ -229,6 +229,7 @@ async fn teardown_invalidated_service(
         let protocol = si.protocol();
         let listen_port = si.listen_port();
         let egress_policy = si.egress_policy().clone();
+        let ingress_policy = si.ingress_policy().clone();
         services.insert(
             invalidated_service.to_string(),
             ServiceInfo::new(
@@ -239,6 +240,7 @@ async fn teardown_invalidated_service(
                 protocol,
                 listen_port,
                 egress_policy,
+                ingress_policy,
             ),
         );
     }

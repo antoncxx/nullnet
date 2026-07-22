@@ -116,12 +116,13 @@ The repository should be cloned under `/root` so the provided `setup-*.sh` scrip
   protocol = "tcp"
   listen_port = 6379
 
-  [[services]]                 # egress country policy
+  [[services]]                 # country policies (egress + ingress)
   name = "api.internal"
   timeout = 0
   docker_container = "my-app_api"
   port = 8000
-  blocked_countries = ["RU", "CN"]
+  egress_blocked_countries = ["RU", "CN"]
+  ingress_allowed_countries = ["US", "IT"]
   ```
 
 - a service is **hostable** when it declares a match key plus a `port` (the backend port replicas
@@ -148,14 +149,21 @@ The repository should be cloned under `/root` so the provided `setup-*.sh` scrip
   the external port nullnet-proxy binds directly and forwards raw traffic from. `listen_port` must
   be globally unique per protocol across every stack (the server refuses to start, or rejects a
   hot-reload, if two services claim the same `protocol`/`listen_port` pair)
-- `blocked_countries` / `allowed_countries` restrict where a service may reach on the internet, by
-  ISO alpha-2 country code (the destination IP is geo-resolved server-side). `blocked_countries`
-  denies the listed countries and allows everything else (including IPs with unknown geo);
-  `allowed_countries` permits only the listed countries and denies everything else (unknown geo
-  included). The two are mutually exclusive — setting both is a hard config error. Enforcement is at
-  the initiator's nullnet-client: the first packet of each new external flow is held and verdicted,
-  denied destinations show a `BLOCKED` chip in the topology UI, and editing the policy at runtime
-  tears down already-established flows that the new policy forbids
+- country policies restrict traffic by ISO alpha-2 country code (the peer IP is geo-resolved
+  server-side, from one shared geo cache). `*_blocked_countries` denies the listed countries and
+  allows everything else (including IPs with unknown geo); `*_allowed_countries` permits only the
+  listed countries and denies everything else (unknown geo included). Within each direction the two
+  are mutually exclusive — setting both is a hard config error. Two directions:
+  - **egress** (`egress_blocked_countries` / `egress_allowed_countries`) — where a service may reach
+    on the internet (destination country). Enforced at the initiator's nullnet-client: the first
+    packet of each new external flow is held and verdicted, denied destinations show a `BLOCKED` chip
+    in the topology UI, and editing the policy at runtime tears down already-established flows the new
+    policy forbids.
+  - **ingress** (`ingress_blocked_countries` / `ingress_allowed_countries`) — which external clients
+    may reach a **proxy-reachable** service (client source country). Enforced server-side at the
+    nullnet-proxy chokepoint: HTTP denials get a `403`, raw tcp/udp denials close the connection.
+    Only valid on a service with a `timeout` (an entry point) — the server rejects an ingress policy
+    on a backend-only service.
 
 - run the project as a daemon (from the repo root)
   ```

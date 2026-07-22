@@ -43,6 +43,13 @@ service NullnetGrpc {
   // service's allowed_/blocked_countries lists. The client caches verdicts.
   rpc CheckEgressDestination(EgressPolicyCheck) returns (EgressPolicyVerdict);
 
+  // Ingress country-policy check for a proxy-reachable service: the proxy asks
+  // whether an external client (by source IP) may reach the named service. The
+  // server resolves the client IP's country and evaluates the service's ingress
+  // allowed_/blocked_countries lists. HTTP denials become a 403; raw tcp/udp
+  // denials close the connection.
+  rpc CheckIngress(IngressPolicyCheck) returns (IngressPolicyVerdict);
+
   // Report an event from a client or proxy agent back to the server.
   rpc ReportEvent(AgentEvent) returns (Empty);
 
@@ -329,6 +336,15 @@ message EgressPolicyCheck {
 }
 
 message EgressPolicyVerdict {
+  bool allowed = 1;
+}
+
+message IngressPolicyCheck {
+  string service_name = 1;
+  string client_ip = 2;
+}
+
+message IngressPolicyVerdict {
   bool allowed = 1;
 }
 

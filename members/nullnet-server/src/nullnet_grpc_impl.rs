@@ -13,14 +13,14 @@ use crate::services::changes::{
 use crate::services::clients::{Client, ClientInfo};
 use crate::services::edge::{Edge, RegisteredEdge};
 use crate::services::input::{MatchIndex, ServicesToml, StackMap};
-use crate::services::service_info::{EgressPolicy, ServiceInfo, backend_involved_services};
+use crate::services::service_info::{CountryPolicy, ServiceInfo, backend_involved_services};
 use crate::timeout::check_timeouts;
 use nullnet_grpc_lib::nullnet_grpc::nullnet_grpc_server::NullnetGrpc;
 use nullnet_grpc_lib::nullnet_grpc::{
     AgentEvent, BackendTriggerRequest, CertBundle, EgressDestinationReport, EgressPolicyCheck,
-    EgressPolicyVerdict, EgressTriggerRequest, Empty, MsgId, Net, NetMessage, NetType, PortMapping,
-    PortMappingBundle, ProxyRequest, ServiceReport, ServiceTrigger, ServicesListResponse, Upstream,
-    agent_event::Event as AgentEventKind,
+    EgressPolicyVerdict, EgressTriggerRequest, Empty, IngressPolicyCheck, IngressPolicyVerdict,
+    MsgId, Net, NetMessage, NetType, PortMapping, PortMappingBundle, ProxyRequest, ServiceReport,
+    ServiceTrigger, ServicesListResponse, Upstream, agent_event::Event as AgentEventKind,
 };
 use nullnet_liberror::{Error, ErrorHandler, Location, location};
 use std::collections::{HashMap, HashSet};
@@ -891,7 +891,7 @@ impl NullnetGrpcImpl {
 
         // One pass over the stacks: find the registered replica and its
         // service's policy together (mirrors resolve_registered_replica).
-        let resolved: Option<(String, EgressPolicy)> = {
+        let resolved: Option<(String, CountryPolicy)> = {
             let guard = self.services.read().await;
             guard.values().find_map(|stack_map| {
                 stack_map.iter().find_map(|(name, si)| {
@@ -915,7 +915,7 @@ impl NullnetGrpcImpl {
             Err("No registered replica matches the egress policy check").handle_err(location!())?
         };
 
-        let allowed = if policy == EgressPolicy::None {
+        let allowed = if policy == CountryPolicy::None {
             true
         } else {
             let country = self.orchestrator.destination_country(dst_ip).await;
@@ -929,6 +929,44 @@ impl NullnetGrpcImpl {
             allowed
         };
         Ok(Response::new(EgressPolicyVerdict { allowed }))
+    }
+
+    async fn check_ingress_impl(
+        &self,
+        request: Request<IngressPolicyCheck>,
+    ) -> Result<Response<IngressPolicyVerdict>, Error> {
+        let req = request.into_inner();
+
+        // The service's ingress policy, or None if the service is unknown (the
+        // proxy will fail to resolve an upstream anyway — don't block here).
+        let policy = {
+            let guard = self.services.read().await;
+            find_service_stack(&guard, &req.service_name)
+                .map(|stack| guard[stack][&req.service_name].ingress_policy().clone())
+                .unwrap_or_default()
+        };
+
+        let allowed = if policy == CountryPolicy::None {
+            true
+        } else {
+            // Unresolvable/non-IPv4 source → unknown country, evaluated by policy
+            // (allow-list unknown → deny; block-list unknown → allow), mirroring egress.
+            let country = match req.client_ip.parse::<Ipv4Addr>() {
+                Ok(ip) => self.orchestrator.destination_country(ip).await,
+                Err(_) => None,
+            };
+            let allowed = policy.allows(country.as_deref());
+            if !allowed {
+                println!(
+                    "[ingress-policy] deny {} ({}) -> '{}'",
+                    req.client_ip,
+                    country.as_deref().unwrap_or("unknown country"),
+                    req.service_name
+                );
+            }
+            allowed
+        };
+        Ok(Response::new(IngressPolicyVerdict { allowed }))
     }
 
     pub(crate) fn services(&self) -> &Arc<RwLock<StackMap>> {
@@ -1477,6 +1515,15 @@ impl NullnetGrpc for NullnetGrpcImpl {
         req: Request<EgressPolicyCheck>,
     ) -> Result<Response<EgressPolicyVerdict>, Status> {
         self.check_egress_destination_impl(req)
+            .await
+            .map_err(|err| Status::internal(err.to_str()))
+    }
+
+    async fn check_ingress(
+        &self,
+        req: Request<IngressPolicyCheck>,
+    ) -> Result<Response<IngressPolicyVerdict>, Status> {
+        self.check_ingress_impl(req)
             .await
             .map_err(|err| Status::internal(err.to_str()))
     }

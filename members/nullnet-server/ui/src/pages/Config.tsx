@@ -24,8 +24,10 @@ timeout = 60                  # proxy-reachable entry point; idle timeout second
 # proxy_dependencies = [["db.example"]]  # dep chains brought up on proxy setup
 # protocol = "tcp"                       # "http" (default) | "tcp" | "udp"
 # listen_port = 5432                     # external proxy port; required for tcp/udp
-# blocked_countries = ["RU", "CN"]       # egress deny-list (exclusive with allowed_countries)
-# allowed_countries = ["US", "IT"]       # egress allow-list
+# egress_blocked_countries = ["RU", "CN"]   # egress deny-list by client dest country
+# egress_allowed_countries = ["US", "IT"]   # egress allow-list (exclusive with the deny-list)
+# ingress_blocked_countries = ["RU"]         # ingress deny-list by client source country
+# ingress_allowed_countries = ["US", "IT"]   # ingress allow-list (needs a timeout / entry point)
 
 # [[services.triggers]]                  # backend-triggered chain: observed port -> chain
 # port = 5555

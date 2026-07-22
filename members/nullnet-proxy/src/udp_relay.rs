@@ -103,6 +103,26 @@ async fn handle_datagram(
         client_ip: src.ip().to_string(),
         service_name: entry.service_name.clone(),
     };
+    // Ingress country policy: an explicit deny drops the datagram (no session).
+    // A check error is logged and allowed through.
+    match proxy
+        .server
+        .check_ingress(entry.service_name.clone(), src.ip().to_string())
+        .await
+    {
+        Ok(false) => {
+            println!(
+                "[udp] ingress policy denied {src} -> '{}'",
+                entry.service_name
+            );
+            return;
+        }
+        Ok(true) => {}
+        Err(e) => eprintln!(
+            "[udp] ingress check failed for '{}': {e}",
+            entry.service_name
+        ),
+    }
     let upstream_addr = match proxy.get_or_add_upstream(proxy_req).await {
         Ok(u) => {
             println!(

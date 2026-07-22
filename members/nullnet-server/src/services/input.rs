@@ -1,7 +1,7 @@
 use crate::events::Event as ServerEvent;
 use crate::orchestrator::Orchestrator;
 use crate::services::changes::{apply_changes, detect_config_changes};
-use crate::services::service_info::{EgressPolicy, ServiceInfo};
+use crate::services::service_info::{CountryPolicy, ServiceInfo};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use nullnet_grpc_lib::nullnet_grpc::ServiceProtocol;
 use nullnet_liberror::{Error, ErrorHandler, Location, location};
@@ -234,7 +234,8 @@ impl ServicesToml {
                     None,
                     ServiceProtocol::Http,
                     None,
-                    EgressPolicy::None,
+                    CountryPolicy::None,
+                    CountryPolicy::None,
                 ),
             );
         }
@@ -264,18 +265,28 @@ impl ServicesToml {
                 }
                 _ => {}
             }
-            let egress_policy = match (s.blocked_countries, s.allowed_countries) {
-                (Some(_), Some(_)) => {
-                    return Err(format!(
-                        "service '{}': 'blocked_countries' and 'allowed_countries' are mutually exclusive",
-                        s.name
-                    ))
-                    .handle_err(location!());
-                }
-                (Some(list), None) => EgressPolicy::Blocked(upper(list)),
-                (None, Some(list)) => EgressPolicy::Allowed(upper(list)),
-                (None, None) => EgressPolicy::None,
-            };
+            let egress_policy = country_policy(
+                s.egress_blocked_countries,
+                s.egress_allowed_countries,
+                "egress",
+                &s.name,
+            )?;
+            let ingress_policy = country_policy(
+                s.ingress_blocked_countries,
+                s.ingress_allowed_countries,
+                "ingress",
+                &s.name,
+            )?;
+            // Ingress policy is enforced at the proxy, which only routes reachable
+            // entry points. On a backend-only service it would be dead config, so
+            // reject it rather than silently ignore.
+            if ingress_policy != CountryPolicy::None && s.timeout.is_none() {
+                return Err(format!(
+                    "service '{}': ingress country policy requires a proxy-reachable service (set a 'timeout')",
+                    s.name
+                ))
+                .handle_err(location!());
+            }
             let triggers = s.triggers.into_iter().map(|t| (t.port, t.chain)).collect();
             ret_val.insert(
                 s.name,
@@ -287,6 +298,7 @@ impl ServicesToml {
                     protocol,
                     s.listen_port,
                     egress_policy,
+                    ingress_policy,
                 ),
             );
         }
@@ -342,6 +354,26 @@ fn upper(list: Vec<String>) -> Vec<String> {
     list.into_iter().map(|c| c.to_uppercase()).collect()
 }
 
+/// Build a `CountryPolicy` from one direction's blocked/allowed lists. The two
+/// lists are mutually exclusive; `dir` ("ingress"/"egress") only shapes the
+/// error message so it names the offending fields.
+fn country_policy(
+    blocked: Option<Vec<String>>,
+    allowed: Option<Vec<String>>,
+    dir: &str,
+    service: &str,
+) -> Result<CountryPolicy, Error> {
+    match (blocked, allowed) {
+        (Some(_), Some(_)) => Err(format!(
+            "service '{service}': '{dir}_blocked_countries' and '{dir}_allowed_countries' are mutually exclusive"
+        ))
+        .handle_err(location!()),
+        (Some(list), None) => Ok(CountryPolicy::Blocked(upper(list))),
+        (None, Some(list)) => Ok(CountryPolicy::Allowed(upper(list))),
+        (None, None) => Ok(CountryPolicy::None),
+    }
+}
+
 /// Single source of truth for "is this stack file valid?": TOML syntax, then the
 /// host-match/port, protocol/listen_port, and country-list rules. Shared by the
 /// disk loader ([`parse_file`]) and the UI save handler ([`validate_stack_toml`]).
@@ -371,12 +403,12 @@ async fn parse_file(path: &Path) -> Result<(HashMap<String, ServiceInfo>, Vec<Ma
 
 /// All non-default egress policies, keyed by (stack, service) — the comparable
 /// footprint used to detect a policy change across a reload.
-fn egress_policies(services: &StackMap) -> BTreeMap<(String, String), EgressPolicy> {
+fn egress_policies(services: &StackMap) -> BTreeMap<(String, String), CountryPolicy> {
     services
         .iter()
         .flat_map(|(stack, map)| {
             map.iter()
-                .filter(|(_, si)| *si.egress_policy() != EgressPolicy::None)
+                .filter(|(_, si)| *si.egress_policy() != CountryPolicy::None)
                 .map(|(name, si)| ((stack.clone(), name.clone()), si.egress_policy().clone()))
         })
         .collect()
@@ -479,11 +511,15 @@ struct ServiceToml {
     /// External port the proxy listens on for this service. Required (and
     /// only meaningful) when `protocol` is `tcp` or `udp`.
     listen_port: Option<u16>,
-    /// Egress country policy (ISO alpha-2 codes), mutually exclusive:
-    /// `blocked_countries` denies the listed countries (unknown → allow);
-    /// `allowed_countries` permits only the listed ones (unknown → deny).
-    blocked_countries: Option<Vec<String>>,
-    allowed_countries: Option<Vec<String>>,
+    /// Country policies (ISO alpha-2 codes). Within each direction the blocked/
+    /// allowed lists are mutually exclusive: `*_blocked_countries` denies the
+    /// listed countries (unknown → allow); `*_allowed_countries` permits only the
+    /// listed ones (unknown → deny). Egress = destination country of the service's
+    /// outbound traffic; ingress = source country of proxy clients reaching it.
+    egress_blocked_countries: Option<Vec<String>>,
+    egress_allowed_countries: Option<Vec<String>>,
+    ingress_blocked_countries: Option<Vec<String>>,
+    ingress_allowed_countries: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -717,7 +753,8 @@ listen_port = 6379
                 None,
                 ServiceProtocol::Tcp,
                 Some(6379),
-                EgressPolicy::None,
+                CountryPolicy::None,
+                CountryPolicy::None,
             ),
         );
         let mut bravo = HashMap::new();
@@ -730,7 +767,8 @@ listen_port = 6379
                 None,
                 ServiceProtocol::Tcp,
                 Some(6379),
-                EgressPolicy::None,
+                CountryPolicy::None,
+                CountryPolicy::None,
             ),
         );
         let stacks: StackMap =
@@ -754,7 +792,8 @@ listen_port = 6379
                 None,
                 ServiceProtocol::Tcp,
                 Some(53),
-                EgressPolicy::None,
+                CountryPolicy::None,
+                CountryPolicy::None,
             ),
         );
         alpha.insert(
@@ -766,7 +805,8 @@ listen_port = 6379
                 None,
                 ServiceProtocol::Udp,
                 Some(53),
-                EgressPolicy::None,
+                CountryPolicy::None,
+                CountryPolicy::None,
             ),
         );
         let stacks: StackMap = HashMap::from([("alpha".to_string(), alpha)]);

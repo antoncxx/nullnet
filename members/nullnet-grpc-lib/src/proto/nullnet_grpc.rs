@@ -344,6 +344,18 @@ pub struct EgressPolicyVerdict {
     #[prost(bool, tag = "1")]
     pub allowed: bool,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct IngressPolicyCheck {
+    #[prost(string, tag = "1")]
+    pub service_name: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub client_ip: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct IngressPolicyVerdict {
+    #[prost(bool, tag = "1")]
+    pub allowed: bool,
+}
 /// A single TLS certificate, keyed by the SNI name it serves (exact, e.g.
 /// "color.com", or wildcard, e.g. "\*.color.com").
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1025,6 +1037,35 @@ pub mod nullnet_grpc_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Ingress country-policy check for a proxy-reachable service: the proxy asks
+        /// whether an external client (by source IP) may reach the named service. The
+        /// server resolves the client IP's country and evaluates the service's ingress
+        /// allowed\_/blocked_countries lists. HTTP denials become a 403; raw tcp/udp
+        /// denials close the connection.
+        pub async fn check_ingress(
+            &mut self,
+            request: impl tonic::IntoRequest<super::IngressPolicyCheck>,
+        ) -> std::result::Result<
+            tonic::Response<super::IngressPolicyVerdict>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/nullnet_grpc.NullnetGrpc/CheckIngress",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("nullnet_grpc.NullnetGrpc", "CheckIngress"));
+            self.inner.unary(req, path, codec).await
+        }
         /// Report an event from a client or proxy agent back to the server.
         pub async fn report_event(
             &mut self,
@@ -1183,6 +1224,18 @@ pub mod nullnet_grpc_server {
             request: tonic::Request<super::EgressPolicyCheck>,
         ) -> std::result::Result<
             tonic::Response<super::EgressPolicyVerdict>,
+            tonic::Status,
+        >;
+        /// Ingress country-policy check for a proxy-reachable service: the proxy asks
+        /// whether an external client (by source IP) may reach the named service. The
+        /// server resolves the client IP's country and evaluates the service's ingress
+        /// allowed\_/blocked_countries lists. HTTP denials become a 403; raw tcp/udp
+        /// denials close the connection.
+        async fn check_ingress(
+            &self,
+            request: tonic::Request<super::IngressPolicyCheck>,
+        ) -> std::result::Result<
+            tonic::Response<super::IngressPolicyVerdict>,
             tonic::Status,
         >;
         /// Report an event from a client or proxy agent back to the server.
@@ -1647,6 +1700,51 @@ pub mod nullnet_grpc_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = CheckEgressDestinationSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/nullnet_grpc.NullnetGrpc/CheckIngress" => {
+                    #[allow(non_camel_case_types)]
+                    struct CheckIngressSvc<T: NullnetGrpc>(pub Arc<T>);
+                    impl<
+                        T: NullnetGrpc,
+                    > tonic::server::UnaryService<super::IngressPolicyCheck>
+                    for CheckIngressSvc<T> {
+                        type Response = super::IngressPolicyVerdict;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::IngressPolicyCheck>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as NullnetGrpc>::check_ingress(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CheckIngressSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

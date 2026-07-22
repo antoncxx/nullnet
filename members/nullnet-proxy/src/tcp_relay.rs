@@ -73,6 +73,27 @@ async fn handle_connection(
         client_ip: client_ip.clone(),
         service_name: entry.service_name.clone(),
     };
+    // Ingress country policy: an explicit deny closes the connection. A check
+    // error is logged and allowed through (upstream lookup fails anyway if the
+    // control plane is down).
+    match proxy
+        .server
+        .check_ingress(entry.service_name.clone(), client_ip.clone())
+        .await
+    {
+        Ok(false) => {
+            println!(
+                "[tcp] ingress policy denied {client_addr} -> '{}'",
+                entry.service_name
+            );
+            return;
+        }
+        Ok(true) => {}
+        Err(e) => eprintln!(
+            "[tcp] ingress check failed for '{}': {e}",
+            entry.service_name
+        ),
+    }
     let upstream = match proxy.get_or_add_upstream(proxy_req).await {
         Ok(u) => {
             println!(

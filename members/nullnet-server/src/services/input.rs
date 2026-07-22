@@ -7,7 +7,7 @@ use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watche
 use nullnet_grpc_lib::nullnet_grpc::ServiceProtocol;
 use nullnet_liberror::{Error, ErrorHandler, Location, location};
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::ops::Sub;
 use std::path::{Path, PathBuf};
@@ -106,21 +106,25 @@ impl ServicesToml {
     /// is claimed by more than one service — ports are global on the proxy,
     /// unlike service names which only need to be unique within a stack.
     pub(crate) async fn load_validated() -> Result<(StackMap, MatchIndex), Error> {
-        let (stacks, index) = Self::load().await?;
+        let (mut stacks, mut index) = Self::load().await?;
+        // Don't brick the control plane on a port conflict (e.g. a bad UI edit or
+        // hand-edited file left two stacks claiming the same listen_port). Drop the
+        // offending stacks and start anyway, logging loudly — the reload path is
+        // likewise tolerant, and an operator can fix the files without downtime.
         let conflicts = detect_port_conflicts(&stacks);
-        if let Some(first) = conflicts.first() {
-            return Err(format!(
-                "port mapping conflict: {} other conflict(s); stack '{}' service '{}' and stack '{}' \
-                 service '{}' both claim {:?}/{}",
-                conflicts.len() - 1,
-                first.stack_a,
-                first.service_a,
-                first.stack_b,
-                first.service_b,
-                first.protocol,
-                first.listen_port
-            ))
-            .handle_err(location!());
+        let mut bad: HashSet<String> = HashSet::new();
+        for c in &conflicts {
+            eprintln!(
+                "[config] port conflict on startup: {:?}/{} claimed by '{}'/'{}' and '{}'/'{}' — \
+                 dropping these stacks until fixed",
+                c.protocol, c.listen_port, c.stack_a, c.service_a, c.stack_b, c.service_b
+            );
+            bad.insert(c.stack_a.clone());
+            bad.insert(c.stack_b.clone());
+        }
+        for stack in &bad {
+            stacks.remove(stack);
+            index.remove(stack);
         }
         Ok((stacks, index))
     }
@@ -432,13 +436,26 @@ fn ingress_policies(services: &StackMap) -> BTreeMap<(String, String), CountryPo
 /// Tear down every active proxy session whose client country the current ingress
 /// policy denies — the same `ForceSessionTeardown` the manual teardown button
 /// uses, so the nullnet overlay is cleaned up. tcp/udp streams close when their
-/// path drops; HTTP/S is already 403'd per-request. Called only when the ingress
-/// footprint changed on reload.
-async fn teardown_ingress_denied_sessions(services: &mut StackMap, orchestrator: &Orchestrator) {
+/// path drops; HTTP/S is already 403'd per-request.
+///
+/// Only the services in `changed` (whose ingress policy actually differs on this
+/// reload) are re-evaluated, so an unrelated policy edit can't disturb others.
+/// Country comes from the cached geo (`geo_get`, no network I/O) — this runs
+/// under the `services` write lock, so it must not block; ingress IPs are warmed
+/// by `check_ingress`, and an unresolved one is treated per policy (allow-list
+/// unknown → deny), consistent with the door check that re-evaluates on reconnect.
+async fn teardown_ingress_denied_sessions(
+    services: &mut StackMap,
+    orchestrator: &Orchestrator,
+    changed: &HashSet<(String, String)>,
+) {
     // Phase 1: collect (stack, service, client) the reloaded policy now denies.
     let mut denied: Vec<(String, String, Client)> = Vec::new();
     for (stack, stack_map) in services.iter() {
         for (svc_name, info) in stack_map {
+            if !changed.contains(&(stack.clone(), svc_name.clone())) {
+                continue;
+            }
             let policy = info.ingress_policy();
             if *policy == CountryPolicy::None {
                 continue;
@@ -453,7 +470,10 @@ async fn teardown_ingress_denied_sessions(services: &mut StackMap, orchestrator:
                 let Ok(ip) = client.name().parse::<Ipv4Addr>() else {
                     continue;
                 };
-                let country = orchestrator.destination_country(ip).await;
+                let country = orchestrator
+                    .geo_get(ip)
+                    .and_then(|g| g.country_code)
+                    .map(|c| c.to_uppercase());
                 if !policy.allows(country.as_deref()) {
                     denied.push((stack.clone(), svc_name.clone(), client));
                 }
@@ -533,10 +553,16 @@ pub(crate) async fn apply_config_update(
         orchestrator.broadcast_egress_policy_changed().await;
     }
 
-    // Any ingress country-policy difference → tear down active proxy sessions the
-    // new policy now denies (overlay cleaned up, tcp/udp streams closed).
-    if ingress_before != ingress_after {
-        teardown_ingress_denied_sessions(services, orchestrator).await;
+    // Services whose ingress policy actually changed (added or altered — a removed
+    // policy is now None and denies nothing, so it needs no teardown). Only these
+    // are re-evaluated, so editing one service's policy can't disturb others.
+    let changed_ingress: HashSet<(String, String)> = ingress_after
+        .iter()
+        .filter(|(k, v)| ingress_before.get(*k) != Some(*v))
+        .map(|(k, _)| k.clone())
+        .collect();
+    if !changed_ingress.is_empty() {
+        teardown_ingress_denied_sessions(services, orchestrator, &changed_ingress).await;
     }
 }
 

@@ -48,6 +48,7 @@ pub static ENCRYPTION_ENABLED: std::sync::LazyLock<bool> =
 ///   - `INGRESS_ALLOW_UDP_PORTS` — local UDP listeners (e.g. Swarm gossip `7946`).
 ///   - `EGRESS_ALLOW_TCP_PORTS`  — TCP dsts a node may initiate to.
 ///   - `EGRESS_ALLOW_UDP_PORTS`  — UDP dsts a node may initiate to (e.g. DNS `53`).
+///
 /// ICMP is portless and always allowed; CT-tracked returns and nullnet's own
 /// control/data plane are always allowed too.
 pub static INGRESS_ALLOW_TCP_PORTS: std::sync::LazyLock<Vec<u32>> =

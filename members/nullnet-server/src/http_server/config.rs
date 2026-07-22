@@ -5,10 +5,16 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
-/// A stack name must be a single bare identifier — no path separators or dots —
-/// so it maps to exactly `./services/<stack>.toml` with no traversal.
+/// A stack name must be a single bare identifier so it maps to exactly
+/// `./services/<stack>.toml` with no traversal. Restricted to the same charset
+/// the UI enforces (`[A-Za-z0-9_-]+`) — this also rejects path separators, dots,
+/// NUL, whitespace, and control characters, which would traverse, fail the write
+/// with a 500, or create ghost files.
 fn valid_stack_name(stack: &str) -> bool {
-    !stack.is_empty() && !stack.contains(['/', '\\', '.'])
+    !stack.is_empty()
+        && stack
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// GET the raw TOML of a stack's service configuration.

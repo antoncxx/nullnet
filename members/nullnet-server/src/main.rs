@@ -41,6 +41,17 @@ async fn main() -> Result<(), Error> {
     // cert private keys are encrypted at rest with this key; fail fast if absent
     crypto::init_from_env()?;
 
+    // The firewall allowlist is now global (single point of decision). An empty
+    // ingress-TCP list means every client's host firewall drops ALL inbound TCP —
+    // including SSH — on startup, so warn loudly rather than silently lock out the
+    // fleet on the next client restart.
+    if env::INGRESS_ALLOW_TCP_PORTS.is_empty() {
+        println!(
+            "WARNING: INGRESS_ALLOW_TCP_PORTS is empty — every client firewall will drop all \
+             inbound TCP (including SSH/22). Set it in the server .env before starting clients."
+        );
+    }
+
     // TODO(grpc-tls): the gRPC server is plaintext, but WatchCertificates
     // streams private keys. Enable TLS here (Server::builder().tls_config(..)),
     // ideally mTLS, so keys never travel in clear; until then keep the control

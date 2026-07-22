@@ -229,8 +229,14 @@ async fn setup_ebpf_firewall(
         .handle_err(location!())?;
 
     // Firewall policy is decided globally by the server and delivered in the
-    // NetworkType response (fetched before this runs). Ports arrive as u16-in-u32.
-    let to_u16 = |ports: &[u32]| ports.iter().map(|&p| p as u16).collect::<Vec<u16>>();
+    // NetworkType response (fetched before this runs). Ports arrive as u16-in-u32;
+    // skip any out-of-range value rather than silently truncating it to a port.
+    let to_u16 = |ports: &[u32]| {
+        ports
+            .iter()
+            .filter_map(|&p| u16::try_from(p).ok())
+            .collect::<Vec<u16>>()
+    };
     let cfg = ebpf::FirewallConfig {
         server_ip,
         control_port: *CONTROL_SERVICE_PORT,

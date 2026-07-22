@@ -937,6 +937,12 @@ impl NullnetGrpcImpl {
     ) -> Result<Response<IngressPolicyVerdict>, Error> {
         let req = request.into_inner();
 
+        // Warm the geo cache for this ingress IP so the UI (Sessions/Internet) and
+        // the reload-time teardown scan can read its country without a network hit.
+        if let Ok(ip) = req.client_ip.parse::<Ipv4Addr>() {
+            self.orchestrator.ensure_geo(ip);
+        }
+
         // The service's ingress policy, or None if the service is unknown (the
         // proxy will fail to resolve an upstream anyway — don't block here).
         let policy = {

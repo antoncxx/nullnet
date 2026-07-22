@@ -45,6 +45,10 @@ export function useApiText(url: string, refreshMs?: number): { text: string | nu
   }, [url]);
 
   useEffect(() => {
+    // Reset on URL (e.g. stack) change so we show "Loading…" rather than briefly
+    // rendering the previous URL's content. Polling calls `load` directly and
+    // doesn't hit this reset.
+    setState({ text: null, loading: true, error: null });
     load();
     if (!refreshMs) return;
     const id = setInterval(load, refreshMs);

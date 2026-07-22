@@ -1,5 +1,5 @@
 import type { GraphJson } from '../../types';
-import { NODE_W, NODE_H, H_GAP, V_GAP, INET_W, INET_H, INET_Y, INET_PROXY_GAP, INTERNET_ID } from './types';
+import { NODE_W, NODE_H, H_GAP, V_GAP, INET_W, INET_H, INET_Y, INET_PROXY_GAP, INTERNET_ID, PLACEHOLDER_PROXY_ID } from './types';
 import type { Pos, TopoNode, TopoEdge } from './types';
 
 export function buildTopoGraph(graph: GraphJson): { nodes: TopoNode[]; edges: TopoEdge[] } {
@@ -12,10 +12,12 @@ export function buildTopoGraph(graph: GraphJson): { nodes: TopoNode[]; edges: To
   }
   for (const ip of proxyIps) nodes.push({ kind: 'proxy', id: ip });
 
-  // Internet node — added whenever there are proxy nodes
-  if (proxyIps.size > 0) {
-    nodes.push({ kind: 'internet', id: INTERNET_ID });
+  // Internet + proxy are always shown, even with no active connections — fall
+  // back to a non-interactive placeholder proxy node when none are live.
+  if (proxyIps.size === 0) {
+    nodes.push({ kind: 'proxy', id: PLACEHOLDER_PROXY_ID, placeholder: true });
   }
+  nodes.push({ kind: 'internet', id: INTERNET_ID });
 
   const inetEdges: TopoEdge[] = [];
   for (const ip of proxyIps) {

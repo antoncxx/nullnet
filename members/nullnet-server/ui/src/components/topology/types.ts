@@ -11,6 +11,7 @@ export const INET_Y = 35;          // top y of internet node
 export const INET_PROXY_GAP = 50;  // gap between internet bottom and proxy top
 
 export const INTERNET_ID = 'internet';
+export const PLACEHOLDER_PROXY_ID = '__no_proxy__';
 
 export interface Pos { x: number; y: number }
 
@@ -21,7 +22,7 @@ export type PanelState =
   | { type: 'internet' };
 
 export interface TopoServiceNode extends GraphNodeJson { kind: 'service' }
-export interface TopoProxyNode { kind: 'proxy'; id: string }
+export interface TopoProxyNode { kind: 'proxy'; id: string; placeholder?: boolean }
 export interface TopoInternetNode { kind: 'internet'; id: string }
 export type TopoNode = TopoServiceNode | TopoProxyNode | TopoInternetNode;
 

@@ -342,13 +342,31 @@ fn upper(list: Vec<String>) -> Vec<String> {
     list.into_iter().map(|c| c.to_uppercase()).collect()
 }
 
+/// Single source of truth for "is this stack file valid?": TOML syntax, then the
+/// host-match/port, protocol/listen_port, and country-list rules. Shared by the
+/// disk loader ([`parse_file`]) and the UI save handler ([`validate_stack_toml`]).
+/// Cross-stack port conflicts are separate — see [`detect_port_conflicts`].
+fn parse_stack_content(
+    content: &str,
+) -> Result<(HashMap<String, ServiceInfo>, Vec<MatchEntry>), Error> {
+    let parsed: ServicesToml = toml::from_str(content).handle_err(location!())?;
+    let match_entries = build_match_entries(&parsed.services)?;
+    Ok((parsed.services_map()?, match_entries))
+}
+
+/// Validate raw TOML the same way the loader does, returning the per-service map
+/// on success or a human-readable error for the UI's parse-status indicator.
+pub(crate) fn validate_stack_toml(content: &str) -> Result<HashMap<String, ServiceInfo>, String> {
+    parse_stack_content(content)
+        .map(|(services, _)| services)
+        .map_err(|e| e.to_str().to_string())
+}
+
 async fn parse_file(path: &Path) -> Result<(HashMap<String, ServiceInfo>, Vec<MatchEntry>), Error> {
     let str_repr = tokio::fs::read_to_string(path)
         .await
         .handle_err(location!())?;
-    let parsed: ServicesToml = toml::from_str(&str_repr).handle_err(location!())?;
-    let match_entries = build_match_entries(&parsed.services)?;
-    Ok((parsed.services_map()?, match_entries))
+    parse_stack_content(&str_repr)
 }
 
 /// All non-default egress policies, keyed by (stack, service) — the comparable

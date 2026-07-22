@@ -16,7 +16,7 @@ use clap::Parser;
 use nullnet_grpc_lib::NullnetGrpcInterface;
 use nullnet_grpc_lib::nullnet_grpc::{
     AgentEvent, AgentServicesListUpdateFailed, AgentServicesListUpdated, Container, Listener, Net,
-    ServiceReport, agent_event::Event as AgentEventKind,
+    NetType, ServiceReport, agent_event::Event as AgentEventKind,
 };
 use nullnet_liberror::{Error, ErrorHandler, Location, location};
 use std::collections::HashMap;
@@ -99,7 +99,7 @@ async fn main() -> Result<(), Error> {
     // control channel learns peers so its add()/remove() land in the PEERS map.
     // Held alive for the whole run (drop = detach). Fails closed: any error
     // aborts startup rather than running unprotected.
-    let ebpf_firewall = match setup_ebpf_firewall(&rtnetlink_handle).await {
+    let ebpf_firewall = match setup_ebpf_firewall(&rtnetlink_handle, &net_type).await {
         Ok(fw) => {
             println!("eBPF host firewall enabled (strict nullnet-only)");
             fw
@@ -205,7 +205,10 @@ fn print_info(net: Net) {
 /// Resolve, attach, and return the host-NIC eBPF firewall. Fails closed: any
 /// problem (unresolvable server, missing NIC, load error) aborts startup rather
 /// than running unprotected.
-async fn setup_ebpf_firewall(rtnetlink_handle: &RtNetLinkHandle) -> Result<ebpf::Firewall, Error> {
+async fn setup_ebpf_firewall(
+    rtnetlink_handle: &RtNetLinkHandle,
+    net_type: &NetType,
+) -> Result<ebpf::Firewall, Error> {
     let server_ip = resolve_server_ip()
         .ok_or("could not resolve CONTROL_SERVICE_ADDR to an IPv4 address")
         .handle_err(location!())?;
@@ -225,14 +228,17 @@ async fn setup_ebpf_firewall(rtnetlink_handle: &RtNetLinkHandle) -> Result<ebpf:
         .ok_or("could not find the ethernet interface name")
         .handle_err(location!())?;
 
+    // Firewall policy is decided globally by the server and delivered in the
+    // NetworkType response (fetched before this runs). Ports arrive as u16-in-u32.
+    let to_u16 = |ports: &[u32]| ports.iter().map(|&p| p as u16).collect::<Vec<u16>>();
     let cfg = ebpf::FirewallConfig {
         server_ip,
         control_port: *CONTROL_SERVICE_PORT,
-        egress_gateway: *crate::env::EGRESS_GATEWAY,
-        ingress_tcp: crate::env::INGRESS_ALLOW_TCP_PORTS.clone(),
-        ingress_udp: crate::env::INGRESS_ALLOW_UDP_PORTS.clone(),
-        egress_tcp: crate::env::EGRESS_ALLOW_TCP_PORTS.clone(),
-        egress_udp: crate::env::EGRESS_ALLOW_UDP_PORTS.clone(),
+        egress_gateway: net_type.egress_gateway,
+        ingress_tcp: to_u16(&net_type.ingress_allow_tcp_ports),
+        ingress_udp: to_u16(&net_type.ingress_allow_udp_ports),
+        egress_tcp: to_u16(&net_type.egress_allow_tcp_ports),
+        egress_udp: to_u16(&net_type.egress_allow_udp_ports),
     };
     if cfg.egress_gateway {
         println!(

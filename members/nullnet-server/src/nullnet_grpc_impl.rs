@@ -1,4 +1,7 @@
-use crate::env::{ENCRYPTION_ENABLED, NET_TYPE, PROXY_IP};
+use crate::env::{
+    EGRESS_ALLOW_TCP_PORTS, EGRESS_ALLOW_UDP_PORTS, ENCRYPTION_ENABLED, INGRESS_ALLOW_TCP_PORTS,
+    INGRESS_ALLOW_UDP_PORTS, NET_TYPE, PROXY_IP,
+};
 use crate::events::Event;
 use crate::graphviz::generate_graphviz;
 use crate::net::EgressRole;
@@ -1392,9 +1395,20 @@ impl NullnetGrpcImpl {
 
 #[tonic::async_trait]
 impl NullnetGrpc for NullnetGrpcImpl {
-    async fn network_type(&self, _: Request<Empty>) -> Result<Response<NetType>, Status> {
+    async fn network_type(&self, req: Request<Empty>) -> Result<Response<NetType>, Status> {
+        // The caller is the egress gateway iff its address matches the configured
+        // PROXY_IP — so the client no longer needs its own EGRESS_GATEWAY flag.
+        let egress_gateway = match (req.remote_addr().map(|a| a.ip()), *PROXY_IP) {
+            (Some(caller), Some(proxy)) => caller == proxy,
+            _ => false,
+        };
         Ok(Response::new(NetType {
             net: (*NET_TYPE).into(),
+            ingress_allow_tcp_ports: INGRESS_ALLOW_TCP_PORTS.clone(),
+            ingress_allow_udp_ports: INGRESS_ALLOW_UDP_PORTS.clone(),
+            egress_allow_tcp_ports: EGRESS_ALLOW_TCP_PORTS.clone(),
+            egress_allow_udp_ports: EGRESS_ALLOW_UDP_PORTS.clone(),
+            egress_gateway,
         }))
     }
 

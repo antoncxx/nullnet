@@ -40,6 +40,10 @@ The repository should be cloned under `/root` so the provided `setup-*.sh` scrip
   CERT_ENCRYPTION_KEY=<32 raw bytes or 64 hex chars>
   PROXY_IP=192.168.1.100
   ENCRYPTION_ENABLED=true
+  INGRESS_ALLOW_TCP_PORTS=22,8080   # inbound TCP listeners every node accepts
+  INGRESS_ALLOW_UDP_PORTS=          # inbound UDP listeners (e.g. Swarm gossip 7946)
+  EGRESS_ALLOW_TCP_PORTS=           # outbound TCP dsts (e.g. 80,443 for updates)
+  EGRESS_ALLOW_UDP_PORTS=53,123     # outbound UDP dsts (DNS, NTP)
   ```
   `CERT_ENCRYPTION_KEY` is **required** — the server refuses to start without it. It encrypts
   TLS certificate private keys (and the DNS-provider credentials of ACME-issued certs) at rest;
@@ -54,6 +58,15 @@ The repository should be cloned under `/root` so the provided `setup-*.sh` scrip
   `ENCRYPTION_ENABLED` toggles per-tunnel VLAN/VXLAN encryption (AES-256-GCM for VLAN, XFRM/MACsec
   for VXLAN) and **defaults to `true`** — omit it to keep encryption on. Set it to `false`/`0`/`no`
   to run tunnels unencrypted instead (a bare vxlan/veth link, no XFRM SA/policy or MACsec).
+
+  The four `{INGRESS,EGRESS}_ALLOW_{TCP,UDP}_PORTS` lists are the **global** host-NIC firewall
+  allowlist — decided here once (single point of decision) and delivered to every node in its
+  `NetworkType` response at startup. They apply uniformly to all clients (matched on destination
+  port). **Put `22` in `INGRESS_ALLOW_TCP_PORTS`** or every strict node loses SSH the moment its
+  client starts. A node that needs name resolution / time sync needs `EGRESS_ALLOW_UDP_PORTS=53,123`;
+  DHCP renewal needs `67` (and inbound `68` for broadcast replies). The gateway node (the one whose
+  IP equals `PROXY_IP`) is switched to gateway posture automatically — all outbound allowed and
+  tracked — so no per-node flag is needed; inbound there still obeys these lists, so include `80,443`.
 
 - TLS certificates are issued from Let's Encrypt via a DNS-01 challenge (UI: *Certificates* page).
   Each cert stores its DNS-provider credentials encrypted at rest and is **renewed automatically**
@@ -184,26 +197,16 @@ The repository should be cloned under `/root` so the provided `setup-*.sh` scrip
   ```
   CONTROL_SERVICE_ADDR=192.168.1.100
   CONTROL_SERVICE_PORT=50051
-  INGRESS_ALLOW_TCP_PORTS=22,8080   # inbound TCP listeners
-  INGRESS_ALLOW_UDP_PORTS=          # inbound UDP listeners (e.g. Swarm gossip 7946)
-  EGRESS_ALLOW_TCP_PORTS=           # outbound TCP dsts (e.g. 80,443 for updates)
-  EGRESS_ALLOW_UDP_PORTS=53,123     # outbound UDP dsts (DNS, NTP)
-  EGRESS_GATEWAY=true               # only on the host that runs nullnet-proxy
   ```
 
   > **⚠️ The client attaches a default-deny eBPF firewall to the uplink NIC on startup.** It permits
   > only the nullnet control plane (gRPC to the server), data plane (VXLAN to peers), established
-  > returns, ICMP (always, both directions — echo + PMTUD), and whatever you list in the four
-  > `{INGRESS,EGRESS}_ALLOW_{TCP,UDP}_PORTS` variables (matched on destination port). **Put `22` in
-  > `INGRESS_ALLOW_TCP_PORTS`** or you will lose SSH the moment the client starts — enabling it over an
-  > SSH session with `22` missing kills the session. A host that needs name resolution / time sync needs
-  > `EGRESS_ALLOW_UDP_PORTS=53,123`; DHCP renewal needs `67` (and inbound `68` for broadcast replies).
-
-  `EGRESS_GATEWAY=true` is set **only on the gateway host** (the one running `nullnet-proxy`). It
-  switches that node's firewall to gateway posture — all outbound is allowed (and tracked) and it
-  forwards brokered egress to the internet; inbound still obeys the allowlist, so list `80,443`
-  (and `22`) in `INGRESS_ALLOW_TCP_PORTS` there. Every other (strict) node obeys the allowlist in
-  both directions.
+  > returns, ICMP (always, both directions — echo + PMTUD), and the port allowlist. That allowlist is
+  > **no longer set here** — it is decided globally on `nullnet-server` (the four
+  > `{INGRESS,EGRESS}_ALLOW_{TCP,UDP}_PORTS` variables) and delivered to the client in its
+  > `NetworkType` response at startup, so there is a single point of decision. Make sure `22` is in the
+  > server's `INGRESS_ALLOW_TCP_PORTS` before starting a client over SSH, or the session dies. The
+  > gateway-vs-strict posture is likewise derived server-side from `PROXY_IP` — no per-client flag.
 
 - run the project as a daemon (from the repo root)
   ```

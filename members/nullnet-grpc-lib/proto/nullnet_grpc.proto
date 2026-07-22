@@ -65,6 +65,16 @@ service NullnetGrpc {
 
 message NetType {
    Net net = 1;
+   // Host-NIC eBPF firewall policy, decided globally by the server (single point
+   // of decision) and applied by the client at startup. Ports are u16 on the
+   // wire's uint32. `egress_gateway` is derived server-side: true iff the caller
+   // is the configured PROXY_IP (the egress boundary node), so clients no longer
+   // carry an EGRESS_GATEWAY flag of their own.
+   repeated uint32 ingress_allow_tcp_ports = 2;
+   repeated uint32 ingress_allow_udp_ports = 3;
+   repeated uint32 egress_allow_tcp_ports = 4;
+   repeated uint32 egress_allow_udp_ports = 5;
+   bool egress_gateway = 6;
 }
 
 enum Net {

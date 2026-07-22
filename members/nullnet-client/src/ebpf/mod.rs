@@ -28,9 +28,10 @@ const EGRESS_PROG: &str = "nullnet_fw_egress";
 const PROTO_TCP: u8 = 6;
 const PROTO_UDP: u8 = 17;
 
-/// Explicit firewall allow policy, all env-driven (see `crate::env`). Nothing is
-/// hardcoded: every host-service port a node accepts or initiates to is listed
-/// here. nullnet's own control/data plane and CT returns are always allowed.
+/// Explicit firewall allow policy, decided globally by the server and delivered
+/// in the `NetworkType` response at startup. Nothing is hardcoded: every
+/// host-service port a node accepts or initiates to is listed here. nullnet's
+/// own control/data plane and CT returns are always allowed.
 pub struct FirewallConfig {
     pub server_ip: Ipv4Addr,
     pub control_port: u16,

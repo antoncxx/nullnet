@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import type { GraphJson, SessionJson } from '../../types';
 import { NODE_W, NODE_H, INET_W, INET_H, INTERNET_ID } from './types';
 import { buildTopoGraph, layoutNodes, svgDims, edgePath, egressEdgePath, inetEdgePath, edgeLabelPoints } from './layout';
@@ -29,6 +30,21 @@ export default function TopologyGraphSvg({
 
   const pos = layoutNodes(nodes, edges);
   const { w, h } = svgDims(pos, nodes);
+
+  // Track edge keys already seen so a connect animation plays only once per
+  // newly-appeared edge, never on initial mount and never on later re-renders
+  // of an edge that was already present (5s poll / SSE refetch keeps refiring
+  // renders for edges that haven't actually changed).
+  const seenEdgeKeysRef = useRef<Set<string> | null>(null);
+  const currentEdgeKeys = new Set(edges.map(e => `${e.from}\0${e.to}`));
+  // Intentional: reads the ref's pre-commit value during render to know which
+  // edges are new-since-last-paint; it's only ever written from the effect
+  // below, after commit, so this is safe (not read-your-own-write).
+  const isNewEdge = (key: string) => seenEdgeKeysRef.current !== null && !seenEdgeKeysRef.current.has(key);
+  useEffect(() => {
+    seenEdgeKeysRef.current = currentEdgeKeys;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [graph]);
 
   const focusedEdgeKeys = new Set<string>();
   const focusedNodeIds = new Set<string>();
@@ -82,14 +98,17 @@ export default function TopologyGraphSvg({
       {onBgClick && <rect x={0} y={0} width={w} height={h} fill="transparent" onClick={onBgClick} />}
 
       {/* Internet → Proxy edges */}
-      {edges.filter(e => e.isInternetEdge).map((e, i) => {
+      {/* eslint-disable-next-line react-hooks/refs -- see isNewEdge comment above */}
+      {edges.filter(e => e.isInternetEdge).map(e => {
         const fp = pos.get(e.from);
         const tp = pos.get(e.to);
         if (!fp || !tp) return null;
         const dimmed = focusedNetIds != null && !focusedNodeIds.has(e.to);
+        const edgeKey = `${e.from}\0${e.to}`;
+        const isNew = isNewEdge(edgeKey);
         return (
           <path
-            key={`inet-${i}`}
+            key={edgeKey}
             d={inetEdgePath(fp, tp)}
             fill="none"
             stroke="rgba(91,156,246,.3)"
@@ -98,17 +117,20 @@ export default function TopologyGraphSvg({
             markerEnd="url(#arr-inet)"
             pointerEvents="none"
             opacity={dimmed ? 0.1 : 1}
+            style={isNew ? { animation: 'edge-fade-in .9s ease-out' } : undefined}
           />
         );
       })}
 
       {/* Service / proxy edges */}
-      {edges.filter(e => !e.isInternetEdge).map((e, i) => {
+      {/* eslint-disable-next-line react-hooks/refs -- see isNewEdge comment above */}
+      {edges.filter(e => !e.isInternetEdge).map(e => {
         const fp = pos.get(e.from);
         const tp = pos.get(e.to);
         if (!fp || !tp) return null;
         const edgeKey = `${e.from}\0${e.to}`;
         const isSel = selectedEdgeKey === edgeKey;
+        const isNew = isNewEdge(edgeKey);
         const dimmed = focusedNetIds != null && !focusedEdgeKeys.has(edgeKey);
         const count = e.originalIndices.length;
         const stroke = isSel
@@ -138,17 +160,26 @@ export default function TopologyGraphSvg({
 
         return (
           <g
-            key={i}
+            key={edgeKey}
             onClick={onEdgeClick ? (ev) => { ev.stopPropagation(); onEdgeClick(e.from, e.to, e.originalIndices); } : undefined}
             style={{ cursor: onEdgeClick ? 'pointer' : 'default', opacity: dimmed ? 0.1 : 1 }}
           >
             {onEdgeClick && <path d={path} fill="none" stroke="transparent" strokeWidth="14" />}
             <path
+              // pathLength normalizes stroke-dasharray/dashoffset to a 0–1 range for the
+              // draw-in animation below — only safe when the edge has no dash pattern of
+              // its own (dash === undefined); setting it on a dashed edge (proxy-hop "4 3",
+              // egress "2 4") would rescale that pattern relative to the whole path and
+              // stretch it into what looks like a solid line once the animation ends.
+              pathLength={dash === undefined ? '1' : undefined}
               d={path} fill="none" stroke={stroke}
               strokeWidth={isSel ? 2 : 1.5}
               strokeDasharray={dash}
               markerEnd={`url(#${arrowId})`}
               pointerEvents="none"
+              style={isNew
+                ? { animation: dash === undefined ? 'edge-draw-in .9s ease-out' : 'edge-fade-in .9s ease-out' }
+                : undefined}
             />
 
             {/* Egress edge marker label (bows out to the right of both nodes) */}
@@ -250,6 +281,25 @@ export default function TopologyGraphSvg({
         }
 
         if (n.kind === 'proxy') {
+          if (n.placeholder) {
+            return (
+              <g key={n.id} style={{ opacity: nodeDimmed ? 0.12 : 1 }}>
+                <rect x={p.x} y={p.y} width={NODE_W} height={NODE_H} rx="8"
+                  fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.12)"
+                  strokeWidth="1" strokeDasharray="5 3" />
+                <circle cx={p.x + 15} cy={p.y + 22} r="3.5" fill="none" stroke="rgba(255,255,255,.25)" strokeWidth="1.5" />
+                <g clipPath={`url(#${clipId})`} pointerEvents="none">
+                  <defs>
+                    <clipPath id={clipId}>
+                      <rect x={p.x + 4} y={p.y + 2} width={NODE_W - 8} height={NODE_H - 4} />
+                    </clipPath>
+                  </defs>
+                  <text x={p.x + 27} y={p.y + 20} fill="rgba(255,255,255,.35)" fontSize="9.5" fontWeight="500">proxy</text>
+                  <text x={p.x + 27} y={p.y + 32} fill="rgba(255,255,255,.25)" fontSize="7.5">no active connections</text>
+                </g>
+              </g>
+            );
+          }
           return (
             <g key={n.id} onClick={clickHandler} style={{ cursor: onNodeClick ? 'pointer' : 'default', opacity: nodeDimmed ? 0.12 : 1 }}>
               <defs>

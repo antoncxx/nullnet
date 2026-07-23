@@ -285,6 +285,14 @@ body {
 /* ── Animations ── */
 @keyframes gp { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
 @keyframes flash { from { background: rgba(52,211,153,.08); } to { background: transparent; } }
+@keyframes edge-draw-in {
+  from { stroke-dasharray: 1; stroke-dashoffset: 1; opacity: 0; }
+  to   { stroke-dasharray: 1; stroke-dashoffset: 0; opacity: 1; }
+}
+@keyframes edge-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
 
 /* ── Scrollbar ── */
 ::-webkit-scrollbar { width: 4px; }
